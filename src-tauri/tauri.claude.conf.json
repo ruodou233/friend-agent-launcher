@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Friend Claude",
+  "identifier": "cn.ruodou.friend-claude-launcher",
+  "build": {
+    "beforeBuildCommand": "npm run build:claude",
+    "frontendDist": "../dist/claude"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Friend Claude"
+      }
+    ]
+  },
+  "bundle": {
+    "shortDescription": "配置并打开原版 Claude Desktop",
+    "longDescription": "无需学习 Provider 或 CC Switch，粘贴 Key 后直接使用原版 Claude Desktop。"
+  }
+}

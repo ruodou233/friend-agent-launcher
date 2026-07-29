@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Friend Codex",
+  "identifier": "cn.ruodou.friend-codex-launcher",
+  "build": {
+    "beforeBuildCommand": "npm run build:codex",
+    "frontendDist": "../dist/codex"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Friend Codex"
+      }
+    ]
+  },
+  "bundle": {
+    "shortDescription": "配置并打开原版 Codex",
+    "longDescription": "无需学习 Provider 或 CC Switch，粘贴 Key 后直接使用原版 ChatGPT / Codex。"
+  }
+}

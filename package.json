@@ -1,0 +1,23 @@
+{
+  "name": "friend-agent-launcher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:claude": "vite --mode claude",
+    "dev:codex": "vite --mode codex",
+    "build:claude": "vite build --mode claude --outDir dist/claude",
+    "build:codex": "vite build --mode codex --outDir dist/codex",
+    "desktop:build:claude": "tauri build --config src-tauri/tauri.claude.conf.json",
+    "desktop:build:codex": "tauri build --config src-tauri/tauri.codex.conf.json",
+    "desktop:build:macos": "bash scripts/build-macos.sh",
+    "test": "npm run build:claude && npm run build:codex && cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "vite": "7.3.6"
+  }
+}
