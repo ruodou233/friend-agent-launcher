@@ -40,8 +40,21 @@ if (-not $installers) {
     throw "No Windows installer was generated."
 }
 
-$checksums = $installers | ForEach-Object {
-    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
-    "$hash *$($_.Name)"
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $checksums = $installers | ForEach-Object {
+        $stream = [System.IO.File]::OpenRead($_.FullName)
+        try {
+            $bytes = $sha256.ComputeHash($stream)
+            $hash = [System.BitConverter]::ToString($bytes).Replace("-", "").ToLowerInvariant()
+            "$hash *$($_.Name)"
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+}
+finally {
+    $sha256.Dispose()
 }
 $checksums | Set-Content -Path (Join-Path $releaseDir "SHA256SUMS.txt") -Encoding ascii

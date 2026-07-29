@@ -290,6 +290,7 @@ fn official_app_path(product: Product) -> Option<PathBuf> {
                 return Some(candidate);
             }
         }
+        return None;
     }
     #[cfg(windows)]
     {
@@ -306,6 +307,7 @@ fn official_app_path(product: Product) -> Option<PathBuf> {
         };
         return candidates.into_iter().find(|path| path.is_file());
     }
+    #[cfg(not(any(target_os = "macos", windows)))]
     None
 }
 
