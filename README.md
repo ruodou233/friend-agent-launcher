@@ -31,6 +31,7 @@ Codex 桌面端也支持用户级自定义 Responses Provider。因此本项目�
 4. 启动器完成一次对应协议的低成本模型调用；高级设置中可获取去重后的模型列表。
 5. 启动器备份现有配置、写入配置、必要时正常重启并打开原版 App。
 6. 以后用户点击 Friend Claude / Friend Codex 图标即可直接进入原版 Agent。
+7. 恢复官方模式时会自动重新打开原版 App；卸载启动器前应先点一次“恢复官方模式”。
 
 “没有 Key？”只提供三个可选入口：免费 Token、邀请朋友奖励、我们的中转站。它不阻塞
 已有 Key 的用户。
@@ -95,6 +96,8 @@ npm ci
 npm test
 npm run desktop:build:claude
 npm run desktop:build:codex
+# Windows 上也可以一次生成两个安装器：
+npm run desktop:build:windows
 ```
 
 没有预设时仍可在“高级设置”手动填写，适合开发调试；发给小白的发行包必须预设公网
@@ -107,6 +110,7 @@ HTTPS 网关和默认逻辑模型。
 - 未签名或临时签名安装包；
 - 每人独立、低额度、可吊销 Key；
 - 在真实 Windows 和 macOS 上完成安装、首次对话、重启、换 Key、恢复配置和卸载测试；
+- 卸载前先在启动器中恢复官方模式，避免遗留本项目的 Provider 配置；
 - 网关不可用或协议不匹配时失败关闭，不写坏原配置。
 
 ### 公开正式版

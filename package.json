@@ -11,6 +11,7 @@
     "desktop:build:claude": "tauri build --config src-tauri/tauri.claude.conf.json",
     "desktop:build:codex": "tauri build --config src-tauri/tauri.codex.conf.json",
     "desktop:build:macos": "bash scripts/build-macos.sh",
+    "desktop:build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
     "test": "npm run build:claude && npm run build:codex && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {

@@ -85,6 +85,7 @@ const secretInput = byId("secret");
 const endpointInput = byId("endpoint");
 const modelInput = byId("model");
 const startButton = byId("start");
+let officialAppRunning = false;
 
 endpointInput.value = defaultGateway;
 modelInput.value = defaultModel;
@@ -100,9 +101,17 @@ function showMessage(message = "", kind = "error") {
   errorBox.textContent = message;
 }
 
+function confirmRestartIfNeeded() {
+  if (!officialAppRunning) return true;
+  return window.confirm(
+    `原版 ${officialName} 正在运行。切换线路需要正常退出并重新打开，请先保存正在进行的任务。现在继续吗？`,
+  );
+}
+
 async function bootstrap() {
   try {
     const data = await invoke("launcher_status");
+    officialAppRunning = data.official_app_running;
     status.classList.toggle("ready", data.official_app_installed);
     status.innerHTML = data.official_app_installed
       ? `<span class="dot"></span><div><strong>原版 ${officialName} 已安装</strong><small>${data.official_app_version || "可以开始使用"}</small></div>`
@@ -121,6 +130,7 @@ async function bootstrap() {
 byId("setup-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   showMessage();
+  if (!confirmRestartIfNeeded()) return;
   startButton.disabled = true;
   startButton.textContent = "正在检查线路…";
   try {
@@ -135,6 +145,7 @@ byId("setup-form").addEventListener("submit", async (event) => {
     secretInput.value = "";
     secretInput.required = false;
     secretInput.placeholder = "Key 已保存；不更换可留空";
+    officialAppRunning = true;
     startButton.textContent = `已打开 ${officialName}`;
     showMessage("配置完成。以后直接从这个图标进入即可。", "success");
   } catch (error) {
@@ -182,8 +193,13 @@ byId("discover-models").addEventListener("click", async () => {
 
 byId("restore").addEventListener("click", async () => {
   try {
+    if (!confirmRestartIfNeeded()) return;
     const restored = await invoke("restore_official_mode");
-    showMessage(restored ? "已恢复安装前的官方配置。" : "没有找到需要恢复的备份。", "success");
+    if (restored) officialAppRunning = true;
+    showMessage(
+      restored ? `已恢复安装前的官方配置，并重新打开 ${officialName}。` : "没有找到需要恢复的备份。",
+      "success",
+    );
   } catch (error) {
     showMessage(errorText(error));
   }

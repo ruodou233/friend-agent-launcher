@@ -16,8 +16,8 @@ jobs:
         os: [macos-14, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -40,3 +40,21 @@ jobs:
             echo "Potential secret found"
             exit 1
           fi
+      - name: Build macOS installers
+        if: runner.os == 'macOS'
+        run: npm run desktop:build:macos
+      - name: Build Windows installers
+        if: runner.os == 'Windows'
+        run: npm run desktop:build:windows
+      - name: Upload macOS developer beta
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: friend-agent-macos
+          path: release/macos/
+      - name: Upload Windows developer beta
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: friend-agent-windows
+          path: release/windows/

@@ -41,6 +41,7 @@ struct SavedSettings {
 #[derive(Debug, Serialize)]
 struct LauncherStatus {
     official_app_installed: bool,
+    official_app_running: bool,
     official_app_version: Option<String>,
     has_saved_secret: bool,
     endpoint: String,
@@ -339,6 +340,7 @@ fn launcher_status(app: AppHandle) -> Result<LauncherStatus, String> {
     let settings = read_saved_settings(&app);
     Ok(LauncherStatus {
         official_app_installed: official_app_installed(product),
+        official_app_running: official_process_running(product),
         official_app_version: None,
         has_saved_secret: has_secret(product),
         endpoint: settings.endpoint,
@@ -362,6 +364,14 @@ fn api_base_url(endpoint: &str) -> String {
     } else {
         format!("{base}/v1")
     }
+}
+
+fn claude_base_url(endpoint: &str) -> String {
+    endpoint
+        .trim_end_matches('/')
+        .strip_suffix("/v1")
+        .unwrap_or_else(|| endpoint.trim_end_matches('/'))
+        .to_string()
 }
 
 fn limited_error(response: reqwest::blocking::Response, secret: &str) -> String {
@@ -518,7 +528,7 @@ fn claude_profile(endpoint: &str, model: &str, secret: &str) -> Value {
     json!({
         "inferenceProvider": "gateway",
         "inferenceCredentialKind": "static",
-        "inferenceGatewayBaseUrl": endpoint,
+        "inferenceGatewayBaseUrl": claude_base_url(endpoint),
         "inferenceGatewayApiKey": secret,
         "inferenceGatewayAuthScheme": "bearer",
         "inferenceModels": [claude_model_entry(model)],
@@ -805,7 +815,10 @@ fn close_official_if_running(product: Product) -> Result<(), String> {
         }
         thread::sleep(Duration::from_millis(200));
     }
-    Err("原版 App 正在运行且未能自动退出。请保存当前工作、完全退出原版 App，再点一次“开始使用”。".into())
+    Err(
+        "原版 App 正在运行且未能自动退出。请保存当前工作、完全退出原版 App，再点一次“开始使用”。"
+            .into(),
+    )
 }
 
 #[tauri::command]
@@ -897,6 +910,9 @@ fn restore_official_mode(app: AppHandle) -> Result<bool, String> {
         Product::Codex => restore_codex(&app),
     }?;
     if restored {
+        if official_app_installed(product) {
+            launch_official(product)?;
+        }
         let _ = keyring_entry(product).and_then(|entry| {
             entry
                 .delete_credential()
@@ -987,6 +1003,10 @@ mod tests {
             api_base_url("https://gateway.example.com/v1/"),
             "https://gateway.example.com/v1"
         );
+        assert_eq!(
+            claude_base_url("https://gateway.example.com/v1/"),
+            "https://gateway.example.com"
+        );
     }
 
     #[test]
@@ -1044,9 +1064,7 @@ mod tests {
         assert_eq!(profile["inferenceModels"][0]["isFamilyDefault"], true);
 
         let opaque = claude_model_entry("vendor-model");
-        assert!(opaque
-            .get("isFamilyDefault")
-            .is_none());
+        assert!(opaque.get("isFamilyDefault").is_none());
     }
 
     #[test]
