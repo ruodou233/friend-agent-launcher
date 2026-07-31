@@ -1,7 +1,11 @@
+mod claude;
+mod gateway;
+mod recovery;
+mod secure_store;
+
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{
-    collections::BTreeSet,
     env, fs,
     io::Write,
     path::{Path, PathBuf},
@@ -13,9 +17,7 @@ use tauri::{AppHandle, Manager};
 use toml_edit::{value, DocumentMut, Item, Table};
 
 const KEYRING_SERVICE: &str = "cn.ruodou.friend-agent-launcher";
-const CLAUDE_PROFILE_ID: &str = "6a9434b2-9ee5-4aa5-99a1-ae6feab0da84";
 const CODEX_PROVIDER_ID: &str = "friend_gateway";
-const MAX_ERROR_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Product {
@@ -32,39 +34,36 @@ impl Product {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct SavedSettings {
-    endpoint: String,
-    model: String,
-}
-
 #[derive(Debug, Serialize)]
 struct LauncherStatus {
     official_app_installed: bool,
     official_app_running: bool,
     official_app_version: Option<String>,
-    has_saved_secret: bool,
-    endpoint: String,
-    model: String,
+    gateway_configured: bool,
 }
 
 #[derive(Debug, Deserialize)]
-struct ConfigureRequest {
-    endpoint: String,
-    model: String,
+#[serde(deny_unknown_fields)]
+struct BeginFriendFlowRequest {
     secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigureRequest {
+    canonical_id: String,
+    catalog_version: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigureResult {
+    state: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
 struct ModelRequest {
     endpoint: String,
     secret: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ClaudeRestore {
-    previous_applied_id: Option<String>,
-    previous_profile: Option<Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -103,6 +102,7 @@ fn home_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "无法确定用户目录".to_string())
 }
 
+#[cfg(windows)]
 fn local_app_data() -> Result<PathBuf, String> {
     if cfg!(windows) {
         env::var_os("LOCALAPPDATA")
@@ -116,39 +116,24 @@ fn local_app_data() -> Result<PathBuf, String> {
 fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
-        .map_err(|error| format!("无法确定启动器数据目录：{error}"))
-}
-
-fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app_data_dir(app)?.join("settings.json"))
+        .map_err(|_| "无法确定启动器数据目录".to_string())
 }
 
 fn restore_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir(app)?.join("restore.json"))
 }
 
+// Keychain access remains only for the old, unregistered Codex compatibility
+// implementation. V1A Claude never calls these functions.
 fn keyring_entry(product: Product) -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYRING_SERVICE, product.account())
-        .map_err(|error| format!("无法打开系统凭据库：{error}"))
+        .map_err(|_| "无法打开系统凭据库".to_string())
 }
 
 fn get_secret(product: Product) -> Result<String, String> {
     keyring_entry(product)?
         .get_password()
         .map_err(|_| "还没有保存 Key，请先粘贴 Key".to_string())
-}
-
-fn has_secret(product: Product) -> bool {
-    get_secret(product)
-        .map(|secret| !secret.trim().is_empty())
-        .unwrap_or(false)
-}
-
-fn validate_secret(secret: &str) -> Result<(), String> {
-    if secret.trim().is_empty() || secret.len() > 20_000 || secret.contains(['\r', '\n', '\0']) {
-        return Err("Key 格式无效".into());
-    }
-    Ok(())
 }
 
 fn validate_endpoint(endpoint: &str) -> Result<(), String> {
@@ -173,6 +158,7 @@ fn validate_endpoint(endpoint: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn validate_model(model: &str) -> Result<(), String> {
     if model.trim().is_empty() || model.len() > 200 || model.contains(['\r', '\n', '\t', ' ']) {
         return Err("模型名称格式无效".into());
@@ -180,98 +166,42 @@ fn validate_model(model: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), String> {
-    let data =
-        serde_json::to_vec_pretty(value).map_err(|error| format!("编码 JSON 失败：{error}"))?;
-    write_bytes_transactional(path, &data)
+fn api_url(endpoint: &str, path: &str) -> String {
+    let base = endpoint.trim_end_matches('/');
+    if base.ends_with("/v1") {
+        format!("{base}/{path}")
+    } else {
+        format!("{base}/v1/{path}")
+    }
 }
 
-fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
-    write_bytes_transactional(path, text.as_bytes())
+#[allow(dead_code)]
+fn api_base_url(endpoint: &str) -> String {
+    let base = endpoint.trim_end_matches('/');
+    if base.ends_with("/v1") {
+        base.to_string()
+    } else {
+        format!("{base}/v1")
+    }
 }
 
-fn write_bytes_transactional(path: &Path, data: &[u8]) -> Result<(), String> {
-    let parent = path.parent().ok_or("目标目录无效")?;
-    fs::create_dir_all(parent).map_err(|error| format!("创建目录失败：{error}"))?;
-    let temporary = path.with_extension("friend-agent.tmp");
-    let backup = path.with_extension("friend-agent.bak");
-    if backup.exists() {
-        if path.exists() {
-            fs::remove_file(&backup)
-                .map_err(|error| format!("清理上次已完成写入的备份失败：{error}"))?;
-        } else {
-            fs::rename(&backup, path)
-                .map_err(|error| format!("恢复上次中断的配置失败：{error}"))?;
-        }
-    }
-    let _ = fs::remove_file(&temporary);
-    fs::write(&temporary, data).map_err(|error| format!("写入临时文件失败：{error}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(path)
-            .map(|metadata| metadata.permissions().mode())
-            .unwrap_or(0o600);
-        fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))
-            .map_err(|error| format!("设置配置权限失败：{error}"))?;
-    }
-
-    if path.exists() {
-        fs::rename(path, &backup).map_err(|error| format!("备份现有配置失败：{error}"))?;
-    }
-    if let Err(error) = fs::rename(&temporary, path) {
-        if backup.exists() {
-            let _ = fs::rename(&backup, path);
-        }
-        return Err(format!("提交配置失败：{error}"));
-    }
-    if backup.exists() {
-        let _ = fs::remove_file(&backup);
-    }
-    Ok(())
-}
-
-fn read_optional_bytes(path: &Path, label: &str) -> Result<Option<Vec<u8>>, String> {
-    match fs::read(path) {
-        Ok(data) => Ok(Some(data)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("读取{label}失败：{error}")),
-    }
+fn limited_error(response: reqwest::blocking::Response, _secret: &str) -> String {
+    // Do not include a server response body: old compatibility paths must not
+    // turn an upstream echo into a Key-bearing UI error.
+    let status = response.status();
+    format!("HTTP {}", status.as_u16())
 }
 
 fn read_optional_text(path: &Path, label: &str) -> Result<Option<String>, String> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("读取{label}失败：{error}")),
+        Err(_) => Err(format!("读取{label}失败")),
     }
 }
 
-fn read_optional_json(path: &Path, label: &str) -> Result<Option<Value>, String> {
-    read_optional_bytes(path, label)?
-        .map(|data| {
-            serde_json::from_slice(&data).map_err(|error| format!("{label} JSON 已损坏：{error}"))
-        })
-        .transpose()
-}
-
-fn read_saved_settings(app: &AppHandle) -> SavedSettings {
-    settings_path(app)
-        .ok()
-        .and_then(|path| fs::read(path).ok())
-        .and_then(|data| serde_json::from_slice(&data).ok())
-        .unwrap_or_default()
-}
-
-fn save_settings(app: &AppHandle, endpoint: &str, model: &str) -> Result<(), String> {
-    write_json_atomic(
-        &settings_path(app)?,
-        &SavedSettings {
-            endpoint: endpoint.into(),
-            model: model.into(),
-        },
-    )
+fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
+    recovery::write_bytes_atomic(path, text.as_bytes())
 }
 
 fn official_app_path(product: Product) -> Option<PathBuf> {
@@ -339,245 +269,94 @@ fn official_app_installed(product: Product) -> bool {
 #[tauri::command]
 fn launcher_status(app: AppHandle) -> Result<LauncherStatus, String> {
     let product = product(&app);
-    let settings = read_saved_settings(&app);
     Ok(LauncherStatus {
         official_app_installed: official_app_installed(product),
         official_app_running: official_process_running(product),
         official_app_version: None,
-        has_saved_secret: has_secret(product),
-        endpoint: settings.endpoint,
-        model: settings.model,
+        gateway_configured: product == Product::Claude && gateway::fixed_gateway_url().is_ok(),
     })
-}
-
-fn api_url(endpoint: &str, path: &str) -> String {
-    let base = endpoint.trim_end_matches('/');
-    if base.ends_with("/v1") {
-        format!("{base}/{path}")
-    } else {
-        format!("{base}/v1/{path}")
-    }
-}
-
-fn api_base_url(endpoint: &str) -> String {
-    let base = endpoint.trim_end_matches('/');
-    if base.ends_with("/v1") {
-        base.to_string()
-    } else {
-        format!("{base}/v1")
-    }
-}
-
-fn claude_base_url(endpoint: &str) -> String {
-    endpoint
-        .trim_end_matches('/')
-        .strip_suffix("/v1")
-        .unwrap_or_else(|| endpoint.trim_end_matches('/'))
-        .to_string()
-}
-
-fn limited_error(response: reqwest::blocking::Response, secret: &str) -> String {
-    let status = response.status();
-    let mut text = response.text().unwrap_or_default();
-    if text.len() > MAX_ERROR_BYTES {
-        text.truncate(MAX_ERROR_BYTES);
-    }
-    if !secret.is_empty() {
-        text = text.replace(secret, "[已隐藏 Key]");
-    }
-    format!("HTTP {}：{}", status.as_u16(), text.trim())
-}
-
-fn test_gateway(product: Product, endpoint: &str, model: &str, secret: &str) -> Result<(), String> {
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(45))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| format!("初始化连接测试失败：{error}"))?;
-
-    let models = client
-        .get(api_url(endpoint, "models"))
-        .bearer_auth(secret)
-        .send()
-        .map_err(|error| format!("无法连接模型目录：{error}"))?;
-    if !models.status().is_success()
-        && models.status() != reqwest::StatusCode::NOT_FOUND
-        && models.status() != reqwest::StatusCode::METHOD_NOT_ALLOWED
-    {
-        return Err(format!(
-            "Key 或 API 地址不可用：{}",
-            limited_error(models, secret)
-        ));
-    }
-
-    let response = match product {
-        Product::Claude => client
-            .post(api_url(endpoint, "messages"))
-            .bearer_auth(secret)
-            .header("anthropic-version", "2023-06-01")
-            .json(&json!({
-                "model": model,
-                "max_tokens": 1,
-                "messages": [{"role": "user", "content": "Reply OK"}]
-            }))
-            .send(),
-        Product::Codex => client
-            .post(api_url(endpoint, "responses"))
-            .bearer_auth(secret)
-            .json(&json!({
-                "model": model,
-                "input": "Reply OK",
-                "max_output_tokens": 1,
-                "stream": false
-            }))
-            .send(),
-    }
-    .map_err(|error| format!("最小模型调用失败：{error}"))?;
-
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "模型或协议不可用：{}",
-            limited_error(response, secret)
-        ))
-    }
 }
 
 #[tauri::command]
-fn discover_models(app: AppHandle, request: ModelRequest) -> Result<Vec<String>, String> {
-    let endpoint = request.endpoint.trim().trim_end_matches('/');
-    validate_endpoint(endpoint)?;
-    let product = product(&app);
-    let secret = if request.secret.trim().is_empty() {
-        get_secret(product)?
-    } else {
-        validate_secret(&request.secret)?;
-        request.secret.trim().to_string()
-    };
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| format!("初始化模型列表失败：{error}"))?;
-    let response = client
-        .get(api_url(endpoint, "models"))
-        .bearer_auth(&secret)
-        .send()
-        .map_err(|error| format!("获取模型列表失败：{error}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "获取模型列表失败：{}",
-            limited_error(response, &secret)
-        ));
+fn begin_friend_flow(
+    app: AppHandle,
+    request: BeginFriendFlowRequest,
+) -> Result<gateway::FriendFlowView, String> {
+    secure_store::clear();
+    if product(&app) != Product::Claude {
+        return Err("Codex 新流程在 V1A 阶段未开放".into());
     }
-    let body: Value = response
-        .json()
-        .map_err(|error| format!("模型列表格式无效：{error}"))?;
-    let models = body
-        .get("data")
-        .and_then(Value::as_array)
-        .ok_or("模型列表缺少 data 数组")?;
-    let unique: BTreeSet<String> = models
-        .iter()
-        .filter_map(|item| item.get("id").and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
-        .collect();
-    if unique.is_empty() {
-        return Err("模型列表为空".into());
-    }
-    Ok(unique.into_iter().collect())
-}
-
-fn claude_library_dir() -> Result<PathBuf, String> {
-    Ok(local_app_data()?.join("Claude-3p/configLibrary"))
-}
-
-fn apply_claude_meta(mut meta: Value) -> Result<(Value, Option<String>), String> {
-    let previous_applied_id = meta
-        .get("appliedId")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .filter(|value| !value.is_empty());
-    let entries = meta
-        .get_mut("entries")
-        .and_then(Value::as_array_mut)
-        .ok_or("Claude 配置库元数据格式不兼容")?;
-    entries.retain(|entry| entry.get("id").and_then(Value::as_str) != Some(CLAUDE_PROFILE_ID));
-    entries.push(json!({"id": CLAUDE_PROFILE_ID, "name": "Friend Gateway"}));
-    meta["appliedId"] = Value::String(CLAUDE_PROFILE_ID.into());
-    Ok((meta, previous_applied_id))
-}
-
-fn claude_model_entry(model: &str) -> Value {
-    let lower = model.to_lowercase();
-    let tier = ["haiku", "sonnet", "opus", "fable", "mythos"]
-        .into_iter()
-        .find(|tier| lower.contains(tier));
-    match tier {
-        Some(tier) => {
-            json!({"name": model, "anthropicFamilyTier": tier, "isFamilyDefault": true})
+    let secret = request.secret.trim().to_string();
+    secure_store::validate_secret(&secret)?;
+    let catalog = match gateway::fetch_catalog(&secret) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            secure_store::clear();
+            return Err(error);
         }
-        None => json!({"name": model}),
-    }
-}
-
-fn claude_profile(endpoint: &str, model: &str, secret: &str) -> Value {
-    json!({
-        "inferenceProvider": "gateway",
-        "inferenceCredentialKind": "static",
-        "inferenceGatewayBaseUrl": claude_base_url(endpoint),
-        "inferenceGatewayApiKey": secret,
-        "inferenceGatewayAuthScheme": "bearer",
-        "inferenceModels": [claude_model_entry(model)],
-        "disableDeploymentModeChooser": true
-    })
-}
-
-fn configure_claude(
-    app: &AppHandle,
-    endpoint: &str,
-    model: &str,
-    secret: &str,
-) -> Result<(), String> {
-    let library = claude_library_dir()?;
-    fs::create_dir_all(&library)
-        .map_err(|error| format!("创建 Claude 3P 配置目录失败：{error}"))?;
-    let meta_path = library.join("_meta.json");
-    let profile_path = library.join(format!("{CLAUDE_PROFILE_ID}.json"));
-
-    if !restore_path(app)?.exists() {
-        let meta = read_optional_json(&meta_path, "Claude 配置库元数据")?
-            .unwrap_or_else(|| json!({"appliedId": "", "entries": []}));
-        let previous_applied_id = meta
-            .get("appliedId")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .filter(|value| !value.is_empty());
-        let previous_profile = read_optional_json(&profile_path, "Claude 原有朋友线路配置")?;
-        write_json_atomic(
-            &restore_path(app)?,
-            &ClaudeRestore {
-                previous_applied_id,
-                previous_profile,
-            },
-        )?;
-    }
-
-    let mut meta = read_optional_json(&meta_path, "Claude 配置库元数据")?
-        .unwrap_or_else(|| json!({"appliedId": "", "entries": []}));
-    (meta, _) = apply_claude_meta(meta)?;
-    let profile = claude_profile(endpoint, model, secret);
-    write_json_atomic(&profile_path, &profile)?;
-    if let Err(error) = write_json_atomic(&meta_path, &meta) {
-        let _ = restore_claude(app);
+    };
+    if let Err(error) = secure_store::replace(secret, catalog.clone()) {
+        secure_store::clear();
         return Err(error);
     }
-    Ok(())
+    Ok(gateway::to_view(&catalog))
+}
+
+#[tauri::command]
+fn configure_and_launch(
+    app: AppHandle,
+    request: ConfigureRequest,
+) -> Result<ConfigureResult, String> {
+    if product(&app) != Product::Claude {
+        secure_store::clear();
+        return Err("Codex 新流程在 V1A 阶段未开放".into());
+    }
+    let context = secure_store::take_current()
+        .ok_or_else(|| "本地配置会话已过期，请重新输入 Key".to_string())?;
+    let result = (|| {
+        let gateway_url = gateway::fixed_gateway_url()?.to_string();
+        let entry = gateway::resolve_entry(
+            &context.catalog,
+            &request.canonical_id,
+            &request.catalog_version,
+        )?;
+        if !official_app_installed(Product::Claude) {
+            return Err("尚未安装原版 Claude，请先点击“下载原版 App”".into());
+        }
+        let paths = claude::default_paths()?;
+        claude::configure(
+            &paths,
+            entry,
+            &request.catalog_version,
+            &gateway_url,
+            &context.secret,
+            || launch_official(Product::Claude),
+        )
+    })();
+    // The context is dropped here on every branch; this explicit clear also
+    // removes any replaced/expired flow entry without exposing its identifier.
+    secure_store::clear();
+    result.map(|_| ConfigureResult { state: "committed" })
+}
+
+#[tauri::command]
+fn refresh_friend_balance(app: AppHandle) -> Result<gateway::Balance, String> {
+    secure_store::clear();
+    if product(&app) != Product::Claude {
+        return Err("Codex 新流程在 V1A 阶段未开放".into());
+    }
+    let gateway_url = gateway::fixed_gateway_url()?.to_string();
+    let paths = claude::default_paths()?;
+    let secret = claude::current_friend_key(&paths, &gateway_url)?;
+    let result = gateway::fetch_balance(&secret);
+    drop(secret);
+    secure_store::clear();
+    result
+}
+
+#[tauri::command]
+fn cancel_friend_flow() {
+    secure_store::clear();
 }
 
 fn codex_config_path() -> Result<PathBuf, String> {
@@ -593,25 +372,34 @@ fn codex_credential_helper_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir(app)?.join("helpers").join(filename))
 }
 
+#[allow(dead_code)]
 fn install_codex_credential_helper(app: &AppHandle) -> Result<PathBuf, String> {
     let destination = codex_credential_helper_path(app)?;
-    let executable =
-        env::current_exe().map_err(|error| format!("无法确定当前启动器路径：{error}"))?;
-    let bytes = fs::read(&executable).map_err(|error| format!("读取凭据 Helper 失败：{error}"))?;
-    write_bytes_transactional(&destination, &bytes)?;
+    let executable = env::current_exe().map_err(|_| "无法确定当前启动器路径".to_string())?;
+    let bytes = fs::read(&executable).map_err(|_| "读取凭据 Helper 失败".to_string())?;
+    write_text_or_bytes(&destination, &bytes)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&destination, fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("设置凭据 Helper 权限失败：{error}"))?;
+            .map_err(|_| "设置凭据 Helper 权限失败".to_string())?;
     }
     Ok(destination)
 }
 
+#[allow(dead_code)]
+fn write_text_or_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    recovery::write_bytes_atomic(path, bytes)
+}
+
+#[allow(dead_code)]
 fn string_value(document: &DocumentMut, key: &str) -> Option<String> {
     document.get(key)?.as_str().map(str::to_string)
 }
 
+// Legacy Codex implementation retained only for source compatibility. It is
+// not registered as a V1A command and the new Claude UI cannot reach it.
+#[allow(dead_code)]
 fn apply_codex_config(document: &mut DocumentMut, endpoint: &str, model: &str, helper_path: &Path) {
     document["model"] = value(model);
     document["model_provider"] = value(CODEX_PROVIDER_ID);
@@ -665,7 +453,7 @@ fn restore_codex_document(document: &mut DocumentMut, restore: CodexRestore) -> 
         if let Some(previous) = restore.previous_friend_provider {
             let item = format!("[model_providers.{CODEX_PROVIDER_ID}]\n{previous}")
                 .parse::<DocumentMut>()
-                .map_err(|error| format!("旧 Provider 备份无法解析：{error}"))
+                .map_err(|_| "旧 Provider 备份无法解析".to_string())
                 .and_then(|mut old| {
                     old["model_providers"]
                         .as_table_like_mut()
@@ -678,6 +466,7 @@ fn restore_codex_document(document: &mut DocumentMut, restore: CodexRestore) -> 
     Ok(())
 }
 
+#[allow(dead_code)]
 fn configure_codex(app: &AppHandle, endpoint: &str, model: &str) -> Result<(), String> {
     let path = codex_config_path()?;
     let original = read_optional_text(&path, "Codex config.toml")?.unwrap_or_default();
@@ -686,7 +475,7 @@ fn configure_codex(app: &AppHandle, endpoint: &str, model: &str) -> Result<(), S
     } else {
         original
             .parse::<DocumentMut>()
-            .map_err(|error| format!("现有 Codex config.toml 无法解析：{error}"))?
+            .map_err(|_| "现有 Codex config.toml 无法解析".to_string())?
     };
 
     if !restore_path(app)?.exists() {
@@ -695,7 +484,7 @@ fn configure_codex(app: &AppHandle, endpoint: &str, model: &str) -> Result<(), S
             .and_then(Item::as_table_like)
             .and_then(|providers| providers.get(CODEX_PROVIDER_ID))
             .map(ToString::to_string);
-        write_json_atomic(
+        recovery::write_json_atomic(
             &restore_path(app)?,
             &CodexRestore {
                 model: string_value(&document, "model"),
@@ -707,7 +496,6 @@ fn configure_codex(app: &AppHandle, endpoint: &str, model: &str) -> Result<(), S
 
     let helper_path = install_codex_credential_helper(app)?;
     apply_codex_config(&mut document, endpoint, model, &helper_path);
-
     write_text_atomic(&path, &document.to_string())
 }
 
@@ -726,8 +514,14 @@ fn launch_official(product: Product) -> Result<(), String> {
         Command::new("/usr/bin/open")
             .args(["-b", bundle_id])
             .spawn()
-            .map_err(|error| format!("打开原版 App 失败：{error}"))?;
-        return Ok(());
+            .map_err(|_| "打开原版 App 失败".to_string())?;
+        for _ in 0..40 {
+            if official_process_running(product) {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        return Err("原版 App 未能启动，配置未提交".into());
     }
     #[cfg(windows)]
     {
@@ -739,8 +533,14 @@ fn launch_official(product: Product) -> Result<(), String> {
         Command::new("explorer.exe")
             .arg(uri)
             .spawn()
-            .map_err(|error| format!("打开原版 App 失败：{error}"))?;
-        return Ok(());
+            .map_err(|_| "打开原版 App 失败".to_string())?;
+        for _ in 0..40 {
+            if official_process_running(product) {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        return Err("原版 App 未能启动，配置未提交".into());
     }
     #[allow(unreachable_code)]
     Err("当前系统暂不支持自动打开官方 App".into())
@@ -817,70 +617,60 @@ fn close_official_if_running(product: Product) -> Result<(), String> {
         }
         thread::sleep(Duration::from_millis(200));
     }
-    Err(
-        "原版 App 正在运行且未能自动退出。请保存当前工作、完全退出原版 App，再点一次“开始使用”。"
-            .into(),
-    )
+    Err("原版 App 正在运行且未能自动退出，请先完全退出后重试".into())
 }
 
-#[tauri::command]
-fn configure_and_launch(app: AppHandle, request: ConfigureRequest) -> Result<(), String> {
-    let endpoint = request.endpoint.trim().trim_end_matches('/');
-    let model = request.model.trim();
+fn read_optional_models(endpoint: &str, secret: &str) -> Result<Vec<String>, String> {
     validate_endpoint(endpoint)?;
-    validate_model(model)?;
-    let product = product(&app);
-    let secret = if request.secret.trim().is_empty() {
-        get_secret(product)?
-    } else {
-        validate_secret(&request.secret)?;
-        request.secret.trim().to_string()
-    };
-
-    test_gateway(product, endpoint, model, &secret)?;
-    keyring_entry(product)?
-        .set_password(&secret)
-        .map_err(|error| format!("保存 Key 到系统凭据库失败：{error}"))?;
-    save_settings(&app, endpoint, model)?;
-    match product {
-        Product::Claude => configure_claude(&app, endpoint, model, &secret)?,
-        Product::Codex => configure_codex(&app, endpoint, model)?,
+    secure_store::validate_secret(secret)?;
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "初始化模型列表失败".to_string())?;
+    let response = client
+        .get(api_url(endpoint, "models"))
+        .bearer_auth(secret.trim())
+        .send()
+        .map_err(|_| "获取模型列表失败".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "获取模型列表失败：{}",
+            limited_error(response, secret)
+        ));
     }
-    launch_official(product)
-}
-
-fn restore_claude(app: &AppHandle) -> Result<bool, String> {
-    let path = restore_path(app)?;
-    if !path.exists() {
-        return Ok(false);
-    }
-    let restore: ClaudeRestore = serde_json::from_slice(
-        &fs::read(&path).map_err(|error| format!("读取恢复信息失败：{error}"))?,
-    )
-    .map_err(|error| format!("恢复信息损坏：{error}"))?;
-    let library = claude_library_dir()?;
-    let meta_path = library.join("_meta.json");
-    let profile_path = library.join(format!("{CLAUDE_PROFILE_ID}.json"));
-    let mut meta = read_optional_json(&meta_path, "Claude 配置库元数据")?
-        .unwrap_or_else(|| json!({"appliedId": "", "entries": []}));
-    if let Some(entries) = meta.get_mut("entries").and_then(Value::as_array_mut) {
-        entries.retain(|entry| entry.get("id").and_then(Value::as_str) != Some(CLAUDE_PROFILE_ID));
-    }
-    if meta.get("appliedId").and_then(Value::as_str) == Some(CLAUDE_PROFILE_ID) {
-        meta["appliedId"] = restore
-            .previous_applied_id
-            .map(Value::String)
-            .unwrap_or_else(|| Value::String(String::new()));
-    }
-    write_json_atomic(&meta_path, &meta)?;
-    match restore.previous_profile {
-        Some(profile) => write_json_atomic(&profile_path, &profile)?,
-        None => {
-            let _ = fs::remove_file(&profile_path);
+    let body: Value = response
+        .json()
+        .map_err(|_| "模型列表格式无效".to_string())?;
+    let models = body
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or("模型列表缺少 data 数组")?;
+    let mut unique = std::collections::BTreeSet::new();
+    for item in models {
+        if let Some(id) = item.get("id").and_then(Value::as_str) {
+            if !id.trim().is_empty() {
+                unique.insert(id.trim().to_string());
+            }
         }
     }
-    fs::remove_file(path).map_err(|error| format!("清理恢复信息失败：{error}"))?;
-    Ok(true)
+    if unique.is_empty() {
+        return Err("模型列表为空".into());
+    }
+    Ok(unique.into_iter().collect())
+}
+
+// Kept unregistered so older Codex source integrations still type-check, but
+// V1A never exposes arbitrary model discovery through the Tauri command table.
+#[allow(dead_code)]
+fn discover_models_legacy(request: ModelRequest) -> Result<Vec<String>, String> {
+    let secret = if request.secret.trim().is_empty() {
+        return Err("旧 Codex 兼容路径需要 Key".into());
+    } else {
+        request.secret.trim().to_string()
+    };
+    read_optional_models(&request.endpoint, &secret)
 }
 
 fn restore_codex(app: &AppHandle) -> Result<bool, String> {
@@ -889,44 +679,42 @@ fn restore_codex(app: &AppHandle) -> Result<bool, String> {
         return Ok(false);
     }
     let restore: CodexRestore = serde_json::from_slice(
-        &fs::read(&restore_file).map_err(|error| format!("读取恢复信息失败：{error}"))?,
+        &fs::read(&restore_file).map_err(|_| "读取恢复信息失败".to_string())?,
     )
-    .map_err(|error| format!("恢复信息损坏：{error}"))?;
+    .map_err(|_| "恢复信息损坏".to_string())?;
     let path = codex_config_path()?;
     let current = read_optional_text(&path, "当前 Codex config.toml")?.unwrap_or_default();
     let mut document = current
         .parse::<DocumentMut>()
-        .map_err(|error| format!("当前 Codex config.toml 无法解析：{error}"))?;
-
+        .map_err(|_| "当前 Codex config.toml 无法解析".to_string())?;
     restore_codex_document(&mut document, restore)?;
     write_text_atomic(&path, &document.to_string())?;
-    fs::remove_file(restore_file).map_err(|error| format!("清理恢复信息失败：{error}"))?;
+    fs::remove_file(restore_file).map_err(|_| "清理恢复信息失败".to_string())?;
     Ok(true)
 }
 
 #[tauri::command]
 fn restore_official_mode(app: AppHandle) -> Result<bool, String> {
+    secure_store::clear();
     let product = product(&app);
     let restored = match product {
-        Product::Claude => restore_claude(&app),
+        Product::Claude => {
+            let paths = claude::default_paths()?;
+            claude::restore(&paths)
+        }
         Product::Codex => restore_codex(&app),
     }?;
-    if restored {
-        if official_app_installed(product) {
-            launch_official(product)?;
-        }
+    if restored && official_app_installed(product) {
+        launch_official(product)?;
+    }
+    if restored && product == Product::Codex {
         let _ = keyring_entry(product).and_then(|entry| {
             entry
                 .delete_credential()
-                .map_err(|error| format!("清理系统凭据失败：{error}"))
+                .map_err(|_| "清理系统凭据失败".to_string())
         });
-        if let Ok(path) = settings_path(&app) {
+        if let Ok(path) = codex_credential_helper_path(&app) {
             let _ = fs::remove_file(path);
-        }
-        if product == Product::Codex {
-            if let Ok(path) = codex_credential_helper_path(&app) {
-                let _ = fs::remove_file(path);
-            }
         }
     }
     Ok(restored)
@@ -944,7 +732,7 @@ fn open_allowed_link(app: AppHandle, target: String) -> Result<(), String> {
         "our-gateway" => "https://github.com/ruodou233/friend-agent-launcher#获取-key",
         _ => return Err("不允许打开这个地址".into()),
     };
-    open::that(url).map_err(|error| format!("打开系统浏览器失败：{error}"))
+    open::that(url).map_err(|_| "打开系统浏览器失败".into())
 }
 
 pub fn run_credential_helper_if_requested() -> bool {
@@ -953,11 +741,18 @@ pub fn run_credential_helper_if_requested() -> bool {
         return false;
     }
     let requested = arguments.get(2).map(String::as_str).unwrap_or_default();
+    if requested == "claude" {
+        eprintln!("V1A Claude 不使用凭据 Helper");
+        std::process::exit(1);
+    }
     let product = match requested {
-        "claude" => Product::Claude,
         "codex" => Product::Codex,
         _ => product_from_executable(),
     };
+    if product == Product::Claude {
+        eprintln!("V1A Claude 不使用凭据 Helper");
+        std::process::exit(1);
+    }
     match get_secret(product) {
         Ok(secret) => {
             let _ = std::io::stdout().write_all(secret.as_bytes());
@@ -974,8 +769,10 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             launcher_status,
-            discover_models,
+            begin_friend_flow,
             configure_and_launch,
+            refresh_friend_balance,
+            cancel_friend_flow,
             restore_official_mode,
             open_allowed_link
         ])
@@ -986,6 +783,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn api_url_handles_versioned_and_unversioned_bases() {
@@ -1004,10 +802,6 @@ mod tests {
         assert_eq!(
             api_base_url("https://gateway.example.com/v1/"),
             "https://gateway.example.com/v1"
-        );
-        assert_eq!(
-            claude_base_url("https://gateway.example.com/v1/"),
-            "https://gateway.example.com"
         );
     }
 
@@ -1028,45 +822,19 @@ mod tests {
     }
 
     #[test]
-    fn claude_meta_keeps_other_profiles_and_selects_friend_profile() {
-        let original = json!({
-            "appliedId": "existing-profile",
-            "entries": [
-                {"id": "existing-profile", "name": "Existing"},
-                {"id": CLAUDE_PROFILE_ID, "name": "Old friend entry"}
-            ],
-            "unknown": {"keep": true}
-        });
-        let (updated, previous) = apply_claude_meta(original).expect("Claude meta should update");
-        assert_eq!(previous.as_deref(), Some("existing-profile"));
-        assert_eq!(updated["appliedId"], CLAUDE_PROFILE_ID);
-        assert_eq!(updated["unknown"]["keep"], true);
-        let friend_entries = updated["entries"]
-            .as_array()
-            .expect("entries")
-            .iter()
-            .filter(|entry| entry["id"] == CLAUDE_PROFILE_ID)
-            .count();
-        assert_eq!(friend_entries, 1);
-    }
-
-    #[test]
-    fn claude_profile_maps_known_tier_and_leaves_opaque_models_explicit() {
-        let profile = claude_profile(
-            "https://gateway.example.com",
-            "claude-fable-5",
-            "secret-placeholder",
-        );
-        assert_eq!(profile["inferenceCredentialKind"], "static");
-        assert_eq!(profile["inferenceModels"][0]["name"], "claude-fable-5");
-        assert_eq!(
-            profile["inferenceModels"][0]["anthropicFamilyTier"],
-            "fable"
-        );
-        assert_eq!(profile["inferenceModels"][0]["isFamilyDefault"], true);
-
-        let opaque = claude_model_entry("vendor-model");
-        assert!(opaque.get("isFamilyDefault").is_none());
+    fn configure_request_rejects_endpoint_model_and_extra_secret_fields() {
+        assert!(serde_json::from_value::<ConfigureRequest>(json!({
+            "canonical_id": "claude.default",
+            "catalog_version": "v1a-test-1"
+        }))
+        .is_ok());
+        assert!(serde_json::from_value::<ConfigureRequest>(json!({
+            "canonical_id": "claude.default",
+            "catalog_version": "v1a-test-1",
+            "endpoint": "https://untrusted.example",
+            "model": "raw-model"
+        }))
+        .is_err());
     }
 
     #[test]
