@@ -1,0 +1,77 @@
+name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME must be set}
+
+services:
+  caddy:
+    image: caddy:2.9-alpine
+    restart: unless-stopped
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?PUBLIC_HOST must be set}
+      NEW_API_PORT: ${NEW_API_PORT:?NEW_API_PORT must be set}
+    ports:
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - edge
+      - backend
+    depends_on:
+      new-api:
+        condition: service_started
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+  new-api:
+    # The image and its vendor-specific environment mapping must be reviewed before deployment.
+    image: ${NEW_API_IMAGE:?NEW_API_IMAGE must be set}
+    restart: unless-stopped
+    environment:
+      NEW_API_LISTEN_ADDR: 0.0.0.0:${NEW_API_PORT:?NEW_API_PORT must be set}
+      NEW_API_ADMIN_BIND: private
+      NEW_API_UPSTREAM_PROVIDER: ${NEW_API_UPSTREAM_PROVIDER:?NEW_API_UPSTREAM_PROVIDER must be set}
+      NEW_API_DATABASE_HOST: db
+      NEW_API_DATABASE_PORT: "3306"
+      NEW_API_DATABASE_NAME: ${MYSQL_DATABASE:?MYSQL_DATABASE must be set}
+      NEW_API_DATABASE_USER: ${MYSQL_USER:?MYSQL_USER must be set}
+      NEW_API_DATABASE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set}
+      NEW_API_SESSION_SECRET: ${NEW_API_SESSION_SECRET:?NEW_API_SESSION_SECRET must be set}
+    expose:
+      - "${NEW_API_PORT:?NEW_API_PORT must be set}"
+    networks:
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?MYSQL_DATABASE must be set}
+      MYSQL_USER: ${MYSQL_USER:?MYSQL_USER must be set}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_ROOT_PASSWORD}\" mysqladmin ping -h 127.0.0.1 -u root --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  caddy_data:
+  caddy_config:
+  mysql_data:
+
+networks:
+  edge:
+  backend:
+    internal: true

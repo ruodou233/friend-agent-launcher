@@ -1,0 +1,40 @@
+{
+	admin off
+}
+
+{$PUBLIC_HOST} {
+	@friend_preflight {
+		path /v1/friend/preflight
+		method GET
+	}
+	@friend_catalog {
+		path /v1/friend/catalog
+		method POST
+	}
+	@friend_balance {
+		path /v1/friend/balance
+		method GET
+	}
+	@friend_messages {
+		path /v1/messages
+		method POST
+	}
+
+	handle @friend_preflight {
+		reverse_proxy new-api:{$NEW_API_PORT}
+	}
+	handle @friend_catalog {
+		reverse_proxy new-api:{$NEW_API_PORT}
+	}
+	handle @friend_balance {
+		reverse_proxy new-api:{$NEW_API_PORT}
+	}
+	handle @friend_messages {
+		reverse_proxy new-api:{$NEW_API_PORT}
+	}
+
+	# No catch-all proxy: management, database, models, responses, and unknown paths are closed.
+	handle {
+		respond "not found" 404
+	}
+}

@@ -1,0 +1,880 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "Friend V1A service contract",
+    "version": "1.0.0-v1a",
+    "description": "Machine-readable V1A contract. This file is an un-deployed, secret-free template: it contains no real domain, account, credential, upstream URL, or key. The public edge exposes exactly four paths; key management and manual recharge paths are private-or-loopback only."
+  },
+  "x-template-status": "not-deployed-not-production-verified",
+  "x-public-paths": [
+    "GET /v1/friend/preflight",
+    "POST /v1/friend/catalog",
+    "GET /v1/friend/balance",
+    "POST /v1/messages"
+  ],
+  "x-private-paths": [
+    "POST /internal/keys",
+    "POST /internal/keys/{token_id}/revoke",
+    "POST /internal/manual-recharges",
+    "GET /internal/manual-recharges/{business_ref}"
+  ],
+  "paths": {
+    "/v1/friend/preflight": {
+      "get": {
+        "operationId": "friendPreflight",
+        "summary": "Check whether the fixed V1A product and protocol are available",
+        "description": "Public and unauthenticated. This operation never accepts a key, account_id, endpoint, model name, or upstream selection, and it does not read or mutate balance.",
+        "tags": ["public"],
+        "security": [],
+        "x-public": true,
+        "x-network-scope": "public-https",
+        "parameters": [
+          { "$ref": "#/components/parameters/RequestId" },
+          { "$ref": "#/components/parameters/ClientVersion" },
+          { "$ref": "#/components/parameters/PreflightProduct" },
+          { "$ref": "#/components/parameters/PreflightProtocol" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Preflight result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PreflightResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/v1/friend/catalog": {
+      "post": {
+        "operationId": "friendCatalog",
+        "summary": "Return the server-signed fixed catalog and current New API balance",
+        "description": "Bearer Friend Key is required. account_id is derived from the presented key and is never accepted from the request body, query, path, or a caller-controlled header. The service does not persist plaintext keys. Catalog model_ref, protocol, gateway_ref, version, expiry, and signature are server-issued and must be verified by the Rust client.",
+        "tags": ["public"],
+        "security": [{ "BearerFriendKey": [] }],
+        "x-public": true,
+        "x-network-scope": "public-https",
+        "x-account-id-source": "derived-from-bearer-friend-key",
+        "parameters": [
+          { "$ref": "#/components/parameters/RequestId" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CatalogRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed catalog and current balance",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CatalogResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/AuthRequired" },
+          "403": { "$ref": "#/components/responses/KeyNotUsable" },
+          "409": { "$ref": "#/components/responses/ProtocolMismatch" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": { "$ref": "#/components/responses/UpstreamUnavailable" }
+        }
+      }
+    },
+    "/v1/friend/balance": {
+      "get": {
+        "operationId": "friendBalance",
+        "summary": "Read the current New API balance",
+        "description": "Bearer Friend Key is required. The response is a read-through of New API; the Friend control plane does not create a second balance ledger. account_id is derived from the key and cannot be supplied or overridden by the caller.",
+        "tags": ["public"],
+        "security": [{ "BearerFriendKey": [] }],
+        "x-public": true,
+        "x-network-scope": "public-https",
+        "x-account-id-source": "derived-from-bearer-friend-key",
+        "parameters": [
+          { "$ref": "#/components/parameters/RequestId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current balance",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/BalanceResponse" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/AuthRequired" },
+          "403": { "$ref": "#/components/responses/KeyNotUsable" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": { "$ref": "#/components/responses/UpstreamUnavailable" }
+        }
+      }
+    },
+    "/v1/messages": {
+      "post": {
+        "operationId": "anthropicMessages",
+        "summary": "V1A Anthropic Messages generation entry point",
+        "description": "Bearer Friend Key is required. Only the fixed LowcostAI V1A route represented by a server-issued friend-model model_ref is accepted. The gateway never automatically retries or transparently replays a generation POST, never switches route after an upstream acceptance signal, and never accepts account_id, endpoint, provider, or a bare upstream model name from the request.",
+        "tags": ["public"],
+        "security": [{ "BearerFriendKey": [] }],
+        "x-public": true,
+        "x-network-scope": "public-https",
+        "x-account-id-source": "derived-from-bearer-friend-key",
+        "x-retry-policy": "no-automatic-generation-post-retry",
+        "parameters": [
+          { "$ref": "#/components/parameters/RequestId" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/MessagesRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Anthropic message response; stream=true selects the text/event-stream representation",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MessageResponse" }
+              },
+              "text/event-stream": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/AuthRequired" },
+          "403": { "$ref": "#/components/responses/KeyNotUsable" },
+          "409": { "$ref": "#/components/responses/ProtocolMismatch" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": { "$ref": "#/components/responses/UpstreamUnavailable" },
+          "503": { "$ref": "#/components/responses/UpstreamUnavailable" }
+        }
+      }
+    },
+    "/internal/keys": {
+      "post": {
+        "operationId": "issueFriendKey",
+        "summary": "Issue one Friend Key for one account/product/install binding",
+        "description": "Private-or-loopback management operation. The issued key is returned once in the response and must not be logged or persisted in plaintext. This internal operator-selected account_id is not evidence that public callers may submit account_id; public ownership is always derived from the Bearer Friend Key.",
+        "tags": ["internal-management"],
+        "security": [{ "InternalMTLS": [] }],
+        "x-public": false,
+        "x-network-scope": "private-or-loopback",
+        "parameters": [
+          { "$ref": "#/components/parameters/RequestId" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/KeyIssueRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Key issued; friend_key is a one-time sensitive response field",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/KeyIssueResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/InternalAuthRequired" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/internal/keys/{token_id}/revoke": {
+      "post": {
+        "operationId": "revokeFriendKey",
+        "summary": "Revoke one Friend Key",
+        "description": "Private-or-loopback management operation. Revocation is terminal for the token and must be observable by all public Bearer-authenticated operations before a replacement key is used.",
+        "tags": ["internal-management"],
+        "security": [{ "InternalMTLS": [] }],
+        "x-public": false,
+        "x-network-scope": "private-or-loopback",
+        "parameters": [
+          { "$ref": "#/components/parameters/RequestId" },
+          { "$ref": "#/components/parameters/TokenId" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/KeyRevokeRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Revoked key metadata without returning the key",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/KeyRecord" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/InternalAuthRequired" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/internal/manual-recharges": {
+      "post": {
+        "operationId": "createManualRecharge",
+        "summary": "Create or replay an idempotent manual WeChat recharge request",
+        "description": "Private-or-loopback management operation. The caller supplies a domain request_id once; the server derives business_ref exactly as manual-wechat:<request_id>. Amount, currency, account binding, and business_ref are immutable after pending creation. A replay with the same request_id and identical immutable fields returns the existing record; a conflicting replay fails.",
+        "tags": ["internal-management"],
+        "security": [{ "InternalMTLS": [] }],
+        "x-public": false,
+        "x-network-scope": "private-or-loopback",
+        "x-balance-source": "new-api-only",
+        "parameters": [
+          { "$ref": "#/components/parameters/RequestId" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ManualRechargeCreateRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "New pending recharge request",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ManualRechargeResponse" }
+              }
+            }
+          },
+          "200": {
+            "description": "Idempotent replay of the existing recharge request",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ManualRechargeResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidRequest" },
+          "401": { "$ref": "#/components/responses/InternalAuthRequired" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/internal/manual-recharges/{business_ref}": {
+      "get": {
+        "operationId": "getManualRecharge",
+        "summary": "Read a manual recharge state for reconciliation",
+        "description": "Private-or-loopback management operation. This endpoint is for reconciliation and audit lookup. It never returns a key and never performs a New API credit operation.",
+        "tags": ["internal-management"],
+        "security": [{ "InternalMTLS": [] }],
+        "x-public": false,
+        "x-network-scope": "private-or-loopback",
+        "parameters": [
+          { "$ref": "#/components/parameters/RequestId" },
+          { "$ref": "#/components/parameters/BusinessRef" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recharge state and immutable request fields",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ManualRechargeResponse" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/InternalAuthRequired" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerFriendKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "Friend-Key-v1",
+        "description": "Only for POST /v1/friend/catalog, GET /v1/friend/balance, and POST /v1/messages. Send only as Authorization: Bearer <Friend Key>; never in query, cookie, request body, account_id, or a caller-controlled routing header. The server derives account_id from this key."
+      },
+      "InternalMTLS": {
+        "type": "mutualTLS",
+        "description": "Only for private-or-loopback management paths. The deployment must not route these paths through the public Caddy edge."
+      }
+    },
+    "parameters": {
+      "RequestId": {
+        "name": "X-Request-Id",
+        "in": "header",
+        "required": true,
+        "description": "Unique ordinary HTTP trace identifier. This is not a Friend Key, not local_flow_id, and not the manual recharge domain request_id in a request body.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        }
+      },
+      "ClientVersion": {
+        "name": "client_version",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "PreflightProduct": {
+        "name": "product",
+        "in": "query",
+        "required": true,
+        "schema": { "type": "string", "const": "claude" }
+      },
+      "PreflightProtocol": {
+        "name": "protocol",
+        "in": "query",
+        "required": true,
+        "schema": { "type": "string", "const": "anthropic-messages" }
+      },
+      "TokenId": {
+        "name": "token_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        }
+      },
+      "BusinessRef": {
+        "name": "business_ref",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 14,
+          "maxLength": 255,
+          "pattern": "^manual-wechat:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        }
+      }
+    },
+    "schemas": {
+      "ErrorCode": {
+        "type": "string",
+        "enum": [
+          "AUTH_REQUIRED",
+          "KEY_EXPIRED",
+          "KEY_REVOKED",
+          "PRODUCT_PROTOCOL_MISMATCH",
+          "CATALOG_EXPIRED",
+          "CATALOG_UNTRUSTED",
+          "UPSTREAM_UNAVAILABLE",
+          "RECOVERY_REQUIRED",
+          "INVALID_REQUEST",
+          "IDEMPOTENCY_CONFLICT",
+          "NOT_FOUND",
+          "RATE_LIMITED",
+          "INTERNAL_AUTH_REQUIRED",
+          "INVALID_STATE",
+          "RECHARGE_EVIDENCE_REQUIRED"
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "code", "message", "retryable"],
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "code": { "$ref": "#/components/schemas/ErrorCode" },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Safe operator/user message; must not contain a key, local_flow_id, full request body, or raw upstream sensitive error."
+          },
+          "retryable": { "type": "boolean" }
+        }
+      },
+      "PreflightResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "available", "product", "protocol", "catalog_version", "expires_at"],
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestIdValue" },
+          "available": { "type": "boolean" },
+          "product": { "type": "string", "const": "claude" },
+          "protocol": { "type": "string", "const": "anthropic-messages" },
+          "catalog_version": { "$ref": "#/components/schemas/CatalogVersion" },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "reason_code": { "$ref": "#/components/schemas/ErrorCode" }
+        }
+      },
+      "CatalogRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["product", "protocol", "install_id"],
+        "properties": {
+          "product": { "type": "string", "const": "claude" },
+          "protocol": { "type": "string", "const": "anthropic-messages" },
+          "install_id": { "$ref": "#/components/schemas/InstallId" }
+        }
+      },
+      "CatalogResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "account_id", "catalog_version", "expires_at", "catalog", "balance"],
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestIdValue" },
+          "account_id": {
+            "$ref": "#/components/schemas/AccountId",
+            "readOnly": true,
+            "description": "Server-derived from the Bearer Friend Key; never accepted from the caller."
+          },
+          "catalog_version": { "$ref": "#/components/schemas/CatalogVersion" },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "catalog": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/components/schemas/CatalogEntry" }
+          },
+          "balance": { "$ref": "#/components/schemas/BalanceSnapshot" }
+        }
+      },
+      "CatalogEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "product",
+          "protocol",
+          "canonical_id",
+          "model_ref",
+          "gateway_ref",
+          "display_name",
+          "capabilities",
+          "default",
+          "catalog_version",
+          "expires_at",
+          "billing_label",
+          "signature"
+        ],
+        "properties": {
+          "product": { "type": "string", "const": "claude" },
+          "protocol": { "type": "string", "const": "anthropic-messages" },
+          "canonical_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "description": "Opaque client selection identifier; not a provider model name."
+          },
+          "model_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^friend-model:[A-Za-z0-9][A-Za-z0-9._:-]{0,110}$",
+            "readOnly": true,
+            "description": "Server-issued internal model reference; never user-entered or treated as a bare upstream model name."
+          },
+          "gateway_ref": {
+            "type": "string",
+            "const": "friend-fixed-gateway",
+            "readOnly": true
+          },
+          "display_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "capabilities": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "enum": ["streaming", "tool_use"] }
+          },
+          "default": { "type": "boolean" },
+          "catalog_version": { "$ref": "#/components/schemas/CatalogVersion" },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "billing_label": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "signature": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "readOnly": true,
+            "description": "Server signature over the catalog entry; no key material is included in this contract."
+          }
+        }
+      },
+      "BalanceSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["amount_minor", "currency", "as_of", "source"],
+        "properties": {
+          "amount_minor": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Read-only integer amount in the currency's minor unit."
+          },
+          "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+          "as_of": { "type": "string", "format": "date-time" },
+          "source": { "type": "string", "const": "new-api" }
+        }
+      },
+      "BalanceResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "account_id", "balance"],
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestIdValue" },
+          "account_id": {
+            "$ref": "#/components/schemas/AccountId",
+            "readOnly": true,
+            "description": "Server-derived from the Bearer Friend Key; never accepted from the caller."
+          },
+          "balance": { "$ref": "#/components/schemas/BalanceSnapshot" }
+        }
+      },
+      "MessagesRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["model", "max_tokens", "messages"],
+        "properties": {
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^friend-model:[A-Za-z0-9][A-Za-z0-9._:-]{0,110}$",
+            "description": "Must be a currently valid server-issued model_ref from the signed catalog."
+          },
+          "max_tokens": { "type": "integer", "minimum": 1, "maximum": 200000 },
+          "messages": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10000,
+            "items": { "$ref": "#/components/schemas/MessageInput" }
+          },
+          "system": {
+            "oneOf": [
+              { "type": "string", "maxLength": 1000000 },
+              { "type": "array", "items": { "$ref": "#/components/schemas/TextContentBlock" } }
+            ]
+          },
+          "tools": {
+            "type": "array",
+            "maxItems": 256,
+            "items": { "$ref": "#/components/schemas/ToolDefinition" }
+          },
+          "stream": { "type": "boolean", "default": false },
+          "temperature": { "type": "number", "minimum": 0, "maximum": 1 },
+          "top_p": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+          "top_k": { "type": "integer", "minimum": 0 },
+          "stop_sequences": {
+            "type": "array",
+            "maxItems": 4,
+            "items": { "type": "string", "maxLength": 1000 }
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "user_id": { "type": "string", "maxLength": 128 },
+              "trace_id": { "type": "string", "maxLength": 128 }
+            },
+            "description": "Optional non-account metadata only; account_id, endpoint, provider, and key fields are forbidden."
+          }
+        }
+      },
+      "MessageInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "content"],
+        "properties": {
+          "role": { "type": "string", "enum": ["user", "assistant"] },
+          "content": {
+            "oneOf": [
+              { "type": "string", "maxLength": 1000000 },
+              {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/MessageContentBlock" }
+              }
+            ]
+          }
+        }
+      },
+      "MessageContentBlock": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/TextContentBlock" },
+          { "$ref": "#/components/schemas/ToolUseContentBlock" },
+          { "$ref": "#/components/schemas/ToolResultContentBlock" }
+        ]
+      },
+      "TextContentBlock": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "text"],
+        "properties": {
+          "type": { "type": "string", "const": "text" },
+          "text": { "type": "string", "maxLength": 1000000 }
+        }
+      },
+      "ToolUseContentBlock": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "id", "name", "input"],
+        "properties": {
+          "type": { "type": "string", "const": "tool_use" },
+          "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "input": { "type": "object" }
+        }
+      },
+      "ToolResultContentBlock": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "tool_use_id", "content"],
+        "properties": {
+          "type": { "type": "string", "const": "tool_result" },
+          "tool_use_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "content": { "type": "string", "maxLength": 1000000 },
+          "is_error": { "type": "boolean" }
+        }
+      },
+      "ToolDefinition": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "input_schema"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "description": { "type": "string", "maxLength": 10000 },
+          "input_schema": { "type": "object" }
+        }
+      },
+      "MessageResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "type", "role", "model", "content", "stop_reason", "usage"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "type": { "type": "string", "const": "message" },
+          "role": { "type": "string", "const": "assistant" },
+          "model": { "$ref": "#/components/schemas/ModelRef" },
+          "content": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/components/schemas/MessageContentBlock" }
+          },
+          "stop_reason": {
+            "type": ["string", "null"],
+            "enum": ["end_turn", "max_tokens", "stop_sequence", "tool_use", null]
+          },
+          "usage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["input_tokens", "output_tokens"],
+            "properties": {
+              "input_tokens": { "type": "integer", "minimum": 0 },
+              "output_tokens": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      },
+      "KeyIssueRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["account_id", "product", "install_id", "expires_at"],
+        "properties": {
+          "account_id": { "$ref": "#/components/schemas/AccountId" },
+          "product": { "type": "string", "const": "claude" },
+          "install_id": { "$ref": "#/components/schemas/InstallId" },
+          "expires_at": { "type": "string", "format": "date-time", "description": "Operator-requested expiry; server rejects past or over-policy values." }
+        }
+      },
+      "KeyIssueResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "token_id", "account_id", "product", "install_id", "status", "expires_at", "friend_key"],
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestIdValue" },
+          "token_id": { "$ref": "#/components/schemas/TokenIdValue" },
+          "account_id": { "$ref": "#/components/schemas/AccountId" },
+          "product": { "type": "string", "const": "claude" },
+          "install_id": { "$ref": "#/components/schemas/InstallId" },
+          "status": { "type": "string", "const": "active" },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "friend_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "x-sensitive": true,
+            "description": "One-time sensitive response field. No example or real key belongs in this contract."
+          }
+        }
+      },
+      "KeyRevokeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reason"],
+        "properties": {
+          "reason": { "type": "string", "minLength": 1, "maxLength": 256 }
+        }
+      },
+      "KeyRecord": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "token_id", "account_id", "product", "install_id", "status", "expires_at", "revoked_at"],
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestIdValue" },
+          "token_id": { "$ref": "#/components/schemas/TokenIdValue" },
+          "account_id": { "$ref": "#/components/schemas/AccountId" },
+          "product": { "type": "string", "const": "claude" },
+          "install_id": { "$ref": "#/components/schemas/InstallId" },
+          "status": { "type": "string", "enum": ["active", "expired", "revoked"] },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "revoked_at": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
+      "ManualRechargeCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "account_id", "amount_minor", "currency"],
+        "properties": {
+          "request_id": {
+            "$ref": "#/components/schemas/RechargeRequestId",
+            "description": "Domain idempotency identifier; separate from X-Request-Id HTTP tracing."
+          },
+          "account_id": { "$ref": "#/components/schemas/AccountId" },
+          "amount_minor": { "type": "integer", "minimum": 1 },
+          "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+          "operator_note": { "type": "string", "maxLength": 512, "description": "Non-sensitive audit note only; do not put a key, payment credential, or full chat transcript here." }
+        }
+      },
+      "ManualRechargeResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "business_ref", "account_id", "amount_minor", "currency", "state", "created_at", "updated_at"],
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RechargeRequestId" },
+          "business_ref": {
+            "type": "string",
+            "pattern": "^manual-wechat:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "readOnly": true,
+            "description": "Server-derived exactly as manual-wechat:<request_id>; unique and immutable."
+          },
+          "account_id": { "$ref": "#/components/schemas/AccountId" },
+          "amount_minor": { "type": "integer", "minimum": 1 },
+          "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+          "state": { "type": "string", "enum": ["pending", "crediting", "credited", "failed"] },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "claim_operator_id": { "type": ["string", "null"], "maxLength": 128 },
+          "claim_at": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
+      "AccountId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      },
+      "InstallId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      },
+      "TokenIdValue": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      },
+      "RequestIdValue": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      },
+      "RechargeRequestId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      },
+      "CatalogVersion": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+      },
+      "ModelRef": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^friend-model:[A-Za-z0-9][A-Za-z0-9._:-]{0,110}$"
+      }
+    },
+    "responses": {
+      "InvalidRequest": {
+        "description": "Request rejected without performing a generation, key, or credit operation",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "AuthRequired": {
+        "description": "Bearer key missing or malformed",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "KeyNotUsable": {
+        "description": "Bearer key expired, revoked, or outside its product/install scope",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "ProtocolMismatch": {
+        "description": "Product or protocol is not the fixed V1A contract",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "UpstreamUnavailable": {
+        "description": "New API or the single V1A upstream route is unavailable; generation POST is not automatically replayed",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "InternalAuthRequired": {
+        "description": "Private management caller did not present the required mTLS identity",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "IdempotencyConflict": {
+        "description": "Existing immutable request or token binding conflicts with the replay",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "NotFound": {
+        "description": "Requested internal record does not exist",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "RateLimited": {
+        "description": "Rate limit exceeded",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      },
+      "ServerError": {
+        "description": "Safe server-side error",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+      }
+    }
+  }
+}
