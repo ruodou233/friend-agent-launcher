@@ -53,7 +53,12 @@ def git_bash_path(path: Path) -> str:
 
     path_text = str(path)
     drive, tail = ntpath.splitdrive(path_text)
-    if len(drive) == 2 and drive[1] == ":" and ntpath.isabs(tail):
+    if (
+        len(drive) == 2
+        and drive[0].isalpha()
+        and drive[1] == ":"
+        and tail.startswith(("\\", "/"))
+    ):
         normalized_tail = tail.replace("\\", "/")
         return f"/{drive[0].lower()}{normalized_tail}"
     return path.as_posix()
@@ -124,6 +129,9 @@ class ReleaseSupportTests(unittest.TestCase):
             git_bash_path(Path(r"D:\a\friend-agent-launcher\scripts\scan-secrets.sh")),
             "/d/a/friend-agent-launcher/scripts/scan-secrets.sh",
         )
+
+    def test_git_bash_path_preserves_drive_relative_path(self) -> None:
+        self.assertEqual(git_bash_path(Path(r"D:relative\file")), r"D:relative\file")
 
     def test_git_bash_path_preserves_posix_path(self) -> None:
         path = Path("/a/friend-agent-launcher/scripts/scan-secrets.sh")
