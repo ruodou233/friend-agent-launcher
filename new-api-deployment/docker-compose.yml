@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     environment:
       PUBLIC_HOST: ${PUBLIC_HOST:?PUBLIC_HOST must be set}
-      NEW_API_PORT: ${NEW_API_PORT:?NEW_API_PORT must be set}
+      FRIEND_GATEWAY_PORT: ${FRIEND_GATEWAY_PORT:?FRIEND_GATEWAY_PORT must be set}
     ports:
       - "443:443"
     volumes:
@@ -15,6 +15,38 @@ services:
       - caddy_config:/config
     networks:
       - edge
+      - backend
+    depends_on:
+      friend-gateway:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+  friend-gateway:
+    # The gateway is the only public Friend wire adapter.  Its proxy mode is
+    # reference-only until the real New API mapping and VPS evidence exist.
+    build:
+      context: ..
+      dockerfile: friend-gateway/Dockerfile
+    restart: unless-stopped
+    environment:
+      FRIEND_GATEWAY_MODE: ${FRIEND_GATEWAY_MODE:?FRIEND_GATEWAY_MODE must be set}
+      FRIEND_GATEWAY_LISTEN_ADDR: 0.0.0.0
+      FRIEND_GATEWAY_PORT: ${FRIEND_GATEWAY_PORT:?FRIEND_GATEWAY_PORT must be set}
+      FRIEND_GATEWAY_CATALOG_FILE: ${FRIEND_GATEWAY_CATALOG_FILE:?FRIEND_GATEWAY_CATALOG_FILE must be set}
+      FRIEND_GATEWAY_KEY_BINDINGS_FILE: ${FRIEND_GATEWAY_KEY_BINDINGS_FILE:?FRIEND_GATEWAY_KEY_BINDINGS_FILE must be set}
+      FRIEND_GATEWAY_UPSTREAM_BASE_URL: ${FRIEND_GATEWAY_UPSTREAM_BASE_URL:?FRIEND_GATEWAY_UPSTREAM_BASE_URL must be set}
+      FRIEND_GATEWAY_BALANCE_ADAPTER_URL: ${FRIEND_GATEWAY_BALANCE_ADAPTER_URL:?FRIEND_GATEWAY_BALANCE_ADAPTER_URL must be set}
+      FRIEND_GATEWAY_UPSTREAM_AUTH_TOKEN: ${FRIEND_GATEWAY_UPSTREAM_AUTH_TOKEN-}
+    expose:
+      - "${FRIEND_GATEWAY_PORT:?FRIEND_GATEWAY_PORT must be set}"
+    volumes:
+      - ../friend-gateway/examples/catalog.json:/app/config/catalog.json:ro
+      - ../friend-gateway/examples/mock-key-bindings.json:/app/config/key-bindings.json:ro
+    networks:
       - backend
     depends_on:
       new-api:

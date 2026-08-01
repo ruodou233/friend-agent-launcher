@@ -6,13 +6,12 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 pub(crate) const PRODUCT: &str = "claude";
 pub(crate) const PROTOCOL: &str = "anthropic-messages";
 pub(crate) const FIXED_GATEWAY_REF: &str = "friend-fixed-gateway";
-pub(crate) const CATALOG_INTEGRITY: &str = "tls-fixed-gateway";
+pub(crate) const CATALOG_TRUST_BOUNDARY: &str = "tls-fixed-gateway";
 pub(crate) const CATALOG_VERSION_PREFIX: &str = "v1a-";
 
-/// There is no public-key verification material in this V1A client yet.
-/// `tls-fixed-gateway` is deliberately not called a signature: directory trust
-/// is limited to the compile-time fixed HTTPS origin (localhost in debug), the
-/// strict wire schema, the V1A version prefix, and expiry checks.
+/// V1A directory trust is transport/schema-bound, not cryptographic: the
+/// client accepts only its fixed HTTPS origin (localhost in debug), this strict
+/// wire schema, the V1A version prefix, and an unexpired response.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CatalogDocument {
@@ -44,8 +43,10 @@ pub(crate) struct CatalogEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Balance {
-    pub(crate) amount: String,
+    pub(crate) amount_minor: u64,
     pub(crate) currency: String,
+    pub(crate) as_of: String,
+    pub(crate) source: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -222,7 +223,7 @@ pub(crate) fn validate_catalog_at(
     {
         return Err("目录版本不受信".into());
     }
-    if document.integrity != CATALOG_INTEGRITY {
+    if document.integrity != CATALOG_TRUST_BOUNDARY {
         return Err("CATALOG_UNTRUSTED".into());
     }
     let expires_at = parse_expiry(&document.expires_at)?;
@@ -248,9 +249,9 @@ pub(crate) fn validate_catalog_at(
         if !opaque_token(&entry.canonical_id, 128)
             || !model_ref(&entry.model_ref)
             || entry.display_name.trim().is_empty()
-            || entry.display_name.len() > 160
+            || entry.display_name.len() > 128
             || entry.billing_label.trim().is_empty()
-            || entry.billing_label.len() > 160
+            || entry.billing_label.len() > 128
         {
             return Err("目录条目字段无效".into());
         }
@@ -258,7 +259,8 @@ pub(crate) fn validate_catalog_at(
             return Err("目录包含重复 canonical_id".into());
         }
         let capabilities: BTreeSet<&str> = entry.capabilities.iter().map(String::as_str).collect();
-        if !capabilities.contains("streaming")
+        if capabilities.len() != entry.capabilities.len()
+            || !capabilities.contains("streaming")
             || capabilities
                 .iter()
                 .any(|capability| !matches!(*capability, "streaming" | "tool_use"))
@@ -276,18 +278,13 @@ pub(crate) fn validate_catalog_at(
 }
 
 fn validate_balance(balance: &Balance) -> Result<(), String> {
-    if balance.amount.trim().is_empty()
-        || balance.amount.len() > 64
-        || balance.currency.trim().is_empty()
-        || balance.currency.len() > 16
-        || !balance
-            .amount
-            .chars()
-            .all(|character| character.is_ascii_digit() || matches!(character, '.' | '-' | '+'))
+    if balance.currency.len() != 3
         || !balance
             .currency
             .chars()
-            .all(|character| character.is_ascii_uppercase() || character == '_')
+            .all(|character| character.is_ascii_uppercase())
+        || balance.source != "new-api"
+        || parse_expiry(&balance.as_of).is_err()
     {
         return Err("余额字段无效".into());
     }
@@ -295,7 +292,10 @@ fn validate_balance(balance: &Balance) -> Result<(), String> {
 }
 
 fn opaque_token(value: &str, max_bytes: usize) -> bool {
-    !value.is_empty()
+    value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
         && value.len() <= max_bytes
         && value
             .bytes()
@@ -303,12 +303,11 @@ fn opaque_token(value: &str, max_bytes: usize) -> bool {
 }
 
 fn model_ref(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && !value.contains("..")
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':' | b'/')
-        })
+    const PREFIX: &str = "friend-model:";
+    value
+        .strip_prefix(PREFIX)
+        .is_some_and(|suffix| opaque_token(suffix, 111))
+        && value.len() <= 128
 }
 
 fn parse_expiry(value: &str) -> Result<OffsetDateTime, String> {
@@ -360,12 +359,12 @@ mod tests {
             "protocol": PROTOCOL,
             "catalog_version": "v1a-test-1",
             "expires_at": expires_at,
-            "integrity": CATALOG_INTEGRITY,
+            "integrity": CATALOG_TRUST_BOUNDARY,
             "catalog": [{
                 "product": PRODUCT,
                 "protocol": PROTOCOL,
                 "canonical_id": "claude.default",
-                "model_ref": "anthropic/claude-test",
+                "model_ref": "friend-model:claude-test",
                 "gateway_ref": FIXED_GATEWAY_REF,
                 "display_name": "Claude 默认",
                 "capabilities": ["streaming", "tool_use"],
@@ -374,13 +373,18 @@ mod tests {
                 "expires_at": expires_at,
                 "billing_label": "按量计费"
             }],
-            "balance": {"amount": "12.50", "currency": "CNY"}
+            "balance": {
+                "amount_minor": 1250,
+                "currency": "CNY",
+                "as_of": "2025-01-01T00:00:00Z",
+                "source": "new-api"
+            }
         }))
         .expect("catalog fixture")
     }
 
     #[test]
-    fn catalog_requires_fixed_tls_marker_and_strict_schema() {
+    fn catalog_requires_fixed_trust_boundary_and_strict_schema() {
         let now = OffsetDateTime::from_unix_timestamp(1_735_689_600).expect("timestamp");
         let expires = (now + time::Duration::hours(1))
             .format(&Rfc3339)
@@ -389,23 +393,76 @@ mod tests {
         assert!(validate_catalog_at(&document, now).is_ok());
 
         let mut untrusted = document.clone();
-        untrusted.integrity = "server-signature".into();
+        untrusted.integrity = "other-trust-boundary".into();
         assert_eq!(
             validate_catalog_at(&untrusted, now),
             Err("CATALOG_UNTRUSTED".into())
         );
 
-        let with_signature = serde_json::json!({
+        let with_extra_field = serde_json::json!({
             "product": PRODUCT,
             "protocol": PROTOCOL,
             "catalog_version": "v1a-test-1",
             "expires_at": expires,
-            "integrity": CATALOG_INTEGRITY,
-            "signature": "not-verified",
+            "integrity": CATALOG_TRUST_BOUNDARY,
+            "unexpected_field": "not-accepted",
             "catalog": [],
-            "balance": {"amount": "1", "currency": "CNY"}
+            "balance": {
+                "amount_minor": 1,
+                "currency": "CNY",
+                "as_of": "2025-01-01T00:00:00Z",
+                "source": "new-api"
+            }
         });
-        assert!(serde_json::from_value::<CatalogDocument>(with_signature).is_err());
+        assert!(serde_json::from_value::<CatalogDocument>(with_extra_field).is_err());
+
+        let entry = serde_json::json!({
+            "product": PRODUCT,
+            "protocol": PROTOCOL,
+            "canonical_id": "claude.default",
+            "model_ref": "friend-model:claude-test",
+            "gateway_ref": FIXED_GATEWAY_REF,
+            "display_name": "Claude 默认",
+            "capabilities": ["streaming", "tool_use"],
+            "default": true,
+            "catalog_version": "v1a-test-1",
+            "expires_at": expires,
+            "billing_label": "按量计费",
+            "unexpected_field": true
+        });
+        assert!(serde_json::from_value::<CatalogEntry>(entry).is_err());
+    }
+
+    #[test]
+    fn client_wire_shapes_use_only_fixed_request_fields_and_minor_balance_units() {
+        let request = serde_json::to_value(CatalogRequest {
+            product: PRODUCT,
+            protocol: PROTOCOL,
+        })
+        .expect("catalog request");
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "product": PRODUCT,
+                "protocol": PROTOCOL
+            })
+        );
+
+        let balance = Balance {
+            amount_minor: 1250,
+            currency: "CNY".into(),
+            as_of: "2025-01-01T00:00:00Z".into(),
+            source: "new-api".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(balance).expect("balance snapshot"),
+            serde_json::json!({
+                "amount_minor": 1250,
+                "currency": "CNY",
+                "as_of": "2025-01-01T00:00:00Z",
+                "source": "new-api"
+            })
+        );
     }
 
     #[test]

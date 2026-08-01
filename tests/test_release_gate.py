@@ -1,0 +1,635 @@
+#!/usr/bin/env python3
+"""Runnable tests for the V1A release gates."""
+
+from __future__ import annotations
+
+import json
+import hashlib
+import importlib.util
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from typing import List, Optional
+
+
+ROOT = Path(__file__).resolve().parent.parent
+VERIFY = ROOT / "scripts" / "verify-release-support.py"
+SCAN = ROOT / "scripts" / "scan-secrets.sh"
+
+
+def run_command(
+    command: List[str], cwd: Path = ROOT, env: Optional[dict] = None
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        cwd=str(cwd),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def run_verify(
+    *arguments: str,
+    support_file: Optional[Path] = None,
+    env: Optional[dict] = None,
+) -> subprocess.CompletedProcess:
+    command = [sys.executable, str(VERIFY)]
+    if support_file is not None:
+        command.extend(["--file", str(support_file)])
+    command.extend(arguments)
+    return run_command(command, env=env)
+
+
+def write_file(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def create_symlink(link: Path, target: Path, *, target_is_directory: bool) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except (NotImplementedError, OSError) as error:
+        raise unittest.SkipTest(f"symlinks are unavailable: {error}") from error
+
+
+def load_verify_module():
+    spec = importlib.util.spec_from_file_location("release_support_verify", VERIFY)
+    if spec is None or spec.loader is None:
+        raise AssertionError("could not load release verifier")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ReleaseSupportTests(unittest.TestCase):
+    def test_current_matrix_is_candidate_only_and_upload_is_blocked(self) -> None:
+        self.assertEqual(run_verify("--action", "check").returncode, 0)
+        self.assertEqual(
+            run_verify("--product", "claude", "--system", "macos", "--action", "build").returncode,
+            0,
+        )
+        self.assertNotEqual(
+            run_verify("--product", "claude", "--system", "macos", "--action", "upload").returncode,
+            0,
+        )
+        self.assertNotEqual(
+            run_verify("--product", "codex", "--system", "macos", "--action", "build").returncode,
+            0,
+        )
+
+    def test_direct_candidate_build_is_blocked_by_the_wrapper_misuse_guard(self) -> None:
+        environment = os.environ.copy()
+        environment.pop("FRIEND_RELEASE_BUILD_WRAPPER", None)
+        result = run_verify(
+            "--product",
+            "claude",
+            "--system",
+            "macos",
+            "--action",
+            "build",
+            "--require-wrapper",
+            env=environment,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("scripts/build-macos.sh", result.stderr)
+
+    def test_wrapper_guard_is_not_described_as_a_security_boundary(self) -> None:
+        verifier = (ROOT / "scripts" / "verify-release-support.py").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        implementation_plan = (ROOT / "IMPLEMENTATION_PLAN.md").read_text(encoding="utf-8")
+
+        self.assertIn("accidental-misuse guard", verifier)
+        self.assertIn("不是安全边界", readme)
+        self.assertIn("不可伪造的安全边界", implementation_plan)
+        for document in (verifier, readme, implementation_plan):
+            self.assertNotIn("证明只能由 wrapper 构建", document)
+            self.assertNotIn("安全不可绕过", document)
+        self.assertNotIn("唯一允许进入 Claude macOS candidate 构建的入口", readme)
+
+    def test_fresh_target_and_claude_only_bundle_allowlist(self) -> None:
+        verifier = load_verify_module()
+        macos_script = (ROOT / "scripts" / "build-macos.sh").read_text(encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary)
+            fresh_bundle = temporary_root / "fresh-target" / "release" / "bundle"
+            expected_dmg = fresh_bundle / "dmg" / verifier.CANDIDATE_DMG_NAME
+            expected_app = fresh_bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Info.plist"
+            write_file(expected_dmg, "claude dmg fixture")
+            write_file(expected_app, "claude app fixture")
+
+            stale_codex = (
+                temporary_root
+                / "repository"
+                / "src-tauri"
+                / "target"
+                / "release"
+                / "bundle"
+                / "dmg"
+                / "Friend Codex_0.1.0_aarch64.dmg"
+            )
+            write_file(stale_codex, "stale codex fixture")
+
+            self.assertEqual(verifier.validate_candidate_bundle(fresh_bundle), expected_dmg)
+
+        self.assertIn("mktemp -d", macos_script)
+        self.assertIn("CARGO_TARGET_DIR", macos_script)
+        self.assertIn("--candidate-bundle", macos_script)
+        self.assertIn("find \"$cargo_target_dir\" -depth -delete", macos_script)
+        self.assertNotIn("src-tauri/target/release/bundle", macos_script)
+        self.assertNotIn("rm -rf", macos_script)
+
+    def test_candidate_allowlist_rejects_extra_and_codex_artifacts(self) -> None:
+        verifier = load_verify_module()
+        extra_artifacts = (
+            Path("dmg") / "Friend Claude-extra.dmg",
+            Path("macos") / "Friend Codex.app" / "Contents" / "Info.plist",
+            Path("windows") / "Friend Claude.exe",
+        )
+
+        for extra_artifact in extra_artifacts:
+            with self.subTest(extra_artifact=str(extra_artifact)), tempfile.TemporaryDirectory() as temporary:
+                bundle = Path(temporary) / "target" / "release" / "bundle"
+                write_file(bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
+                write_file(bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Info.plist", "claude app fixture")
+                write_file(bundle / extra_artifact, "unexpected artifact")
+
+                with self.assertRaises(verifier.ReleaseGateError):
+                    verifier.validate_candidate_bundle(bundle)
+
+    def test_candidate_direct_allowlist_rejects_extra_files_directories_and_siblings(self) -> None:
+        verifier = load_verify_module()
+        extra_entries = (
+            ("root-file", Path("release-notes.txt"), False),
+            ("root-directory", Path("release-notes"), True),
+            ("dmg-file", Path("dmg") / "Other Claude.dmg", False),
+            ("dmg-directory", Path("dmg") / "other", True),
+            ("macos-sibling-app", Path("macos") / "Friend Codex.app" / "Contents" / "Info.plist", False),
+            ("macos-sibling-dmg", Path("macos") / "Other Claude.dmg", False),
+        )
+
+        for case, extra_entry, is_directory in extra_entries:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                bundle = Path(temporary) / "target" / "release" / "bundle"
+                write_file(bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
+                write_file(bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Info.plist", "claude app fixture")
+                if is_directory:
+                    (bundle / extra_entry).mkdir(parents=True, exist_ok=True)
+                else:
+                    write_file(bundle / extra_entry, "unexpected entry")
+
+                with self.assertRaises(verifier.ReleaseGateError):
+                    verifier.validate_candidate_bundle(bundle)
+
+    def test_candidate_root_entries_must_be_directories(self) -> None:
+        verifier = load_verify_module()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cases = ("dmg", "macos")
+            for wrong_root_entry in cases:
+                with self.subTest(wrong_root_entry=wrong_root_entry):
+                    bundle = root / wrong_root_entry
+                    if wrong_root_entry == "dmg":
+                        write_file(bundle / "dmg", "not a directory")
+                        write_file(bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Info.plist", "claude app fixture")
+                    else:
+                        write_file(bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
+                        write_file(bundle / "macos", "not a directory")
+
+                    with self.assertRaises(verifier.ReleaseGateError):
+                        verifier.validate_candidate_bundle(bundle)
+
+    def test_candidate_app_bundle_allows_real_internal_files_and_directories(self) -> None:
+        verifier = load_verify_module()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "target" / "release" / "bundle"
+            expected_dmg = bundle / "dmg" / verifier.CANDIDATE_DMG_NAME
+            expected_app = bundle / verifier.EXPECTED_CLAUDE_APP
+            write_file(expected_dmg, "claude dmg fixture")
+            write_file(expected_app / "Contents" / "Info.plist", "claude app fixture")
+            write_file(expected_app / "Contents" / "Resources" / "embedded.bin", "embedded fixture")
+            (expected_app / "Contents" / "Frameworks" / "Nested.framework").mkdir(parents=True)
+
+            self.assertEqual(verifier.validate_candidate_bundle(bundle), expected_dmg)
+
+    def test_candidate_allowlist_rejects_root_and_nested_symlinks(self) -> None:
+        verifier = load_verify_module()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            real_bundle = root / "real-bundle"
+            write_file(real_bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
+            write_file(real_bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Info.plist", "claude app fixture")
+            root_link = root / "bundle-link"
+            create_symlink(root_link, real_bundle, target_is_directory=True)
+            with self.assertRaises(verifier.ReleaseGateError):
+                verifier.validate_candidate_bundle(root_link)
+
+            cases = ("expected-dmg", "expected-app", "nested-file", "nested-directory")
+            for case in cases:
+                with self.subTest(case=case):
+                    bundle = root / case
+                    if case == "expected-dmg":
+                        write_file(bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Info.plist", "claude app fixture")
+                        target = root / "outside.dmg"
+                        write_file(target, "outside dmg fixture")
+                        link = bundle / "dmg" / verifier.CANDIDATE_DMG_NAME
+                        link.parent.mkdir(parents=True, exist_ok=True)
+                        create_symlink(link, target, target_is_directory=False)
+                    elif case == "expected-app":
+                        write_file(bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
+                        target = root / "outside.app"
+                        write_file(target / "Contents" / "Info.plist", "outside app fixture")
+                        link = bundle / verifier.EXPECTED_CLAUDE_APP
+                        link.parent.mkdir(parents=True, exist_ok=True)
+                        create_symlink(link, target, target_is_directory=True)
+                    else:
+                        write_file(bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
+                        write_file(bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Info.plist", "claude app fixture")
+                        if case == "nested-file":
+                            target = root / "outside.bin"
+                            write_file(target, "outside file fixture")
+                            link = bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Resources" / "embedded.bin"
+                            link.parent.mkdir(parents=True, exist_ok=True)
+                            create_symlink(link, target, target_is_directory=False)
+                        else:
+                            target = root / "outside-resources"
+                            target.mkdir(parents=True, exist_ok=True)
+                            link = bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Resources"
+                            link.parent.mkdir(parents=True, exist_ok=True)
+                            create_symlink(link, target, target_is_directory=True)
+
+                    with self.assertRaises(verifier.ReleaseGateError):
+                        verifier.validate_candidate_bundle(bundle)
+
+    def test_release_directory_allowlist_rejects_extra_entries(self) -> None:
+        verifier = load_verify_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            release_dir = Path(temporary) / "release" / "macos"
+            write_file(release_dir / verifier.RELEASE_CANDIDATE_DMG_NAME, "candidate")
+            write_file(release_dir / verifier.RELEASE_CHECKSUM_NAME, "checksum")
+            verifier.validate_release_directory(release_dir, require_outputs=True)
+
+            write_file(release_dir / "Friend Codex_0.1.0_aarch64.dmg", "codex")
+            with self.assertRaises(verifier.ReleaseGateError):
+                verifier.validate_release_directory(release_dir)
+
+    def test_release_directory_allowlist_rejects_root_and_file_symlinks(self) -> None:
+        verifier = load_verify_module()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real_release = root / "real-release"
+            write_file(real_release / verifier.RELEASE_CANDIDATE_DMG_NAME, "candidate")
+            write_file(real_release / verifier.RELEASE_CHECKSUM_NAME, "checksum")
+
+            root_link = root / "release-link"
+            create_symlink(root_link, real_release, target_is_directory=True)
+            with self.assertRaises(verifier.ReleaseGateError):
+                verifier.validate_release_directory(root_link, require_outputs=True)
+
+            for name in (verifier.RELEASE_CANDIDATE_DMG_NAME, verifier.RELEASE_CHECKSUM_NAME):
+                with self.subTest(name=name):
+                    release_dir = root / ("file-" + name.replace("/", "-"))
+                    release_dir.mkdir(parents=True)
+                    target = root / ("outside-" + name)
+                    write_file(target, "outside release fixture")
+                    create_symlink(release_dir / name, target, target_is_directory=False)
+                    other_name = (
+                        verifier.RELEASE_CHECKSUM_NAME
+                        if name == verifier.RELEASE_CANDIDATE_DMG_NAME
+                        else verifier.RELEASE_CANDIDATE_DMG_NAME
+                    )
+                    write_file(release_dir / other_name, "other fixture")
+                    with self.assertRaises(verifier.ReleaseGateError):
+                        verifier.validate_release_directory(release_dir, require_outputs=True)
+
+            nested = root / "nested-release"
+            write_file(nested / verifier.RELEASE_CANDIDATE_DMG_NAME, "candidate")
+            write_file(nested / verifier.RELEASE_CHECKSUM_NAME, "checksum")
+            nested_target = root / "outside-nested"
+            nested_target.mkdir(parents=True)
+            nested_link = nested / "unexpected" / "link"
+            nested_link.parent.mkdir(parents=True)
+            create_symlink(nested_link, nested_target, target_is_directory=True)
+            with self.assertRaises(verifier.ReleaseGateError):
+                verifier.validate_release_directory(nested)
+
+    def test_fake_digest_and_blocked_target_cannot_upload(self) -> None:
+        document = json.loads((ROOT / "release-support.json").read_text(encoding="utf-8"))
+        target = next(item for item in document["targets"] if item["product"] == "claude" and item["system"] == "macos")
+        target["status"] = "go"
+        target["channel"] = "friend-release"
+        target["p0_evidence_digest"] = "sha256:" + ("a" * 64)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            support_file = Path(temporary) / "release-support.json"
+            support_file.write_text(json.dumps(document), encoding="utf-8")
+            allowed = run_verify(
+                "--product", "claude", "--system", "macos", "--action", "upload", support_file=support_file
+            )
+            self.assertNotEqual(allowed.returncode, 0)
+
+            target["p0_evidence_digest"] = None
+            support_file.write_text(json.dumps(document), encoding="utf-8")
+            blocked = run_verify(
+                "--product", "claude", "--system", "macos", "--action", "upload", support_file=support_file
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+
+        blocked_target = run_verify("--product", "codex", "--system", "windows", "--action", "upload")
+        self.assertNotEqual(blocked_target.returncode, 0)
+
+    def test_future_evidence_binding_uses_exact_redacted_file_bytes(self) -> None:
+        verifier = load_verify_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary) / "p0-evidence.txt"
+            evidence.write_bytes(b"redacted evidence fixture\n")
+            digest = "sha256:" + hashlib.sha256(evidence.read_bytes()).hexdigest()
+            target = {"p0_evidence_digest": digest}
+            self.assertIsNone(verifier.validate_evidence_binding(target, evidence))
+
+            target["p0_evidence_digest"] = "sha256:" + ("a" * 64)
+            with self.assertRaises(verifier.ReleaseGateError):
+                verifier.validate_evidence_binding(target, evidence)
+
+    def test_package_and_workflows_keep_release_boundaries(self) -> None:
+        package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+        self.assertEqual(package["author"], "ruodou233 & shing19")
+        self.assertIn("ruodou233", package["contributors"])
+        self.assertIn("shing19", package["contributors"])
+        self.assertEqual(package["engines"]["node"], "22.x")
+        cargo_toml = (ROOT / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8")
+        self.assertIn('authors = ["ruodou233", "shing19"]', cargo_toml)
+        self.assertEqual(package["scripts"]["desktop:build:claude"], "bash scripts/build-macos.sh")
+        self.assertIn("process.platform", package["scripts"]["test:release"])
+        self.assertIn("tests/test_release_gate.py", package["scripts"]["test:release"])
+        self.assertIn("process.platform", package["scripts"]["desktop:build:codex"])
+        self.assertIn("'--product','codex'", package["scripts"]["desktop:build:codex"])
+        self.assertNotIn("tauri build", package["scripts"]["desktop:build:codex"])
+
+        lock_root = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))["packages"][""]
+        self.assertEqual(lock_root["author"], package["author"])
+        self.assertEqual(lock_root["contributors"], package["contributors"])
+        self.assertEqual(lock_root["engines"], package["engines"])
+        self.assertEqual(lock_root["dependencies"], package["dependencies"])
+        self.assertEqual(lock_root["devDependencies"], package["devDependencies"])
+
+        env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("FRIEND_GATEWAY_URL=https://gateway.example.invalid", env_example)
+        self.assertNotIn("FRIEND_CLAUDE_MODEL", env_example)
+        self.assertNotIn("FRIEND_CODEX_MODEL", env_example)
+
+        macos_script = (ROOT / "scripts" / "build-macos.sh").read_text(encoding="utf-8")
+        self.assertIn("candidate", macos_script)
+        self.assertIn("scan-secrets.sh", macos_script)
+        self.assertIn("FRIEND_RELEASE_BUILD_WRAPPER", macos_script)
+        self.assertIn("hdiutil attach -readonly", macos_script)
+        self.assertIn("npm exec -- tauri build", macos_script)
+        self.assertIn("-- --locked", macos_script)
+        self.assertIn('bash "$scan_script" "$root_dir" "$mount_dir"', macos_script)
+        self.assertNotIn("desktop:build:codex", macos_script)
+        self.assertNotIn("desktop:build:macos", macos_script)
+        self.assertNotIn("desktop:build:claude", macos_script)
+        self.assertNotIn("Friend-Codex", macos_script)
+
+        default_config = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+        self.assertFalse(default_config["bundle"]["active"])
+        self.assertIn("--require-wrapper", default_config["build"]["beforeBuildCommand"])
+        self.assertNotIn("desktop:build:claude", default_config["build"]["beforeBuildCommand"])
+
+        windows_script = (ROOT / "scripts" / "build-windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("V1A release gate", windows_script)
+        self.assertIn("Windows artifact production is blocked", windows_script)
+        self.assertNotIn("npm run", windows_script)
+        self.assertNotIn("Copy-Installers", windows_script)
+        self.assertNotIn("Remove-Item", windows_script)
+
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("node-version: 22", workflow)
+        self.assertIn("actions/setup-python", workflow)
+        self.assertIn("contracts/validate_contract.py", workflow)
+        self.assertIn("payment-control-plane/verify.sh", workflow)
+        self.assertIn("brew install ripgrep", workflow)
+        self.assertIn("choco install ripgrep", workflow)
+        self.assertIn("command -v rg", workflow)
+        self.assertIn("tests/test_deployment_static.py", workflow)
+        self.assertIn("cargo fmt", workflow)
+        self.assertIn("cargo test --locked --manifest-path src-tauri/Cargo.toml --release", workflow)
+        self.assertNotIn("CARGOFLAGS", workflow)
+        self.assertIn("friend-gateway/tests/test_gateway.py", workflow)
+        self.assertIn("scripts/scan-secrets.sh", workflow)
+        self.assertIn("desktop:build:macos", workflow)
+        self.assertNotIn("actions/upload-artifact", workflow)
+        self.assertNotIn("desktop:build:windows", workflow)
+        self.assertNotIn("desktop:build:codex", workflow)
+
+        claude_config = json.loads((ROOT / "src-tauri" / "tauri.claude.conf.json").read_text(encoding="utf-8"))
+        self.assertIn("candidate", claude_config["bundle"]["longDescription"])
+        self.assertTrue(claude_config["bundle"]["active"])
+        self.assertEqual(claude_config["bundle"]["targets"], ["dmg"])
+        self.assertIn("verify-release-support.py", claude_config["build"]["beforeBuildCommand"])
+        self.assertIn("--require-wrapper", claude_config["build"]["beforeBuildCommand"])
+        self.assertNotIn("一键可用", claude_config["bundle"]["longDescription"])
+
+        codex_config = json.loads((ROOT / "src-tauri" / "tauri.codex.conf.json").read_text(encoding="utf-8"))
+        self.assertFalse(codex_config["bundle"]["active"])
+        self.assertIn("research", codex_config["bundle"]["shortDescription"])
+        self.assertIn("blocked", codex_config["bundle"]["longDescription"])
+        self.assertIn("verify-release-support.py", codex_config["build"]["beforeBuildCommand"])
+
+    def test_contract_and_documents_keep_current_boundaries(self) -> None:
+        contract_result = run_command([sys.executable, str(ROOT / "contracts" / "validate_contract.py")])
+        self.assertEqual(contract_result.returncode, 0, contract_result.stderr)
+
+        contract = json.loads((ROOT / "contracts" / "friend-api.openapi.json").read_text(encoding="utf-8"))
+        schemas = contract["components"]["schemas"]
+        self.assertEqual(schemas["CatalogRequest"]["required"], ["product", "protocol"])
+        self.assertEqual(
+            set(schemas["CatalogRequest"]["properties"]),
+            {"product", "protocol"},
+        )
+        self.assertNotIn("account_id", schemas["CatalogRequest"]["properties"])
+        self.assertNotIn("install_id", schemas["CatalogRequest"]["properties"])
+        self.assertEqual(
+            set(schemas["CatalogResponse"]["required"]),
+            {"product", "protocol", "catalog_version", "expires_at", "integrity", "catalog", "balance"},
+        )
+        self.assertEqual(
+            schemas["CatalogResponse"]["properties"]["integrity"]["const"],
+            "tls-fixed-gateway",
+        )
+        self.assertNotIn("signature", json.dumps(contract).lower())
+        self.assertEqual(
+            schemas["BalanceSnapshot"]["properties"]["amount_minor"]["type"],
+            "integer",
+        )
+        self.assertEqual(schemas["BalanceResponse"]["required"], ["product", "balance"])
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("非官方 companion/launcher", readme)
+        self.assertIn("作者：ruodou233、shing19", readme)
+        self.assertIn("Claude macOS", readme)
+        self.assertIn("Codex macOS / Windows", readme)
+        self.assertIn("reference/mock", readme)
+        self.assertIn("真实 New API", readme)
+        self.assertIn("未部署模板", readme)
+        self.assertNotIn("高级设置", readme)
+        self.assertNotIn("双产品可下载", readme)
+        self.assertIn("配置成功后，Key 按 Claude 官方 3P 静态配置写入当前 Friend profile", readme)
+        self.assertIn("本工具设置、日志和恢复 manifest 不另存或回显", readme)
+        self.assertNotIn("不会回显、落盘或进入日志", readme)
+
+        implementation_plan = (ROOT / "IMPLEMENTATION_PLAN.md").read_text(encoding="utf-8")
+        self.assertIn("旧行为与已落地基线", implementation_plan)
+        self.assertIn("tls-fixed-gateway", implementation_plan)
+        self.assertIn("公钥签名是未来增强", implementation_plan)
+        self.assertIn("当前 Claude profile", implementation_plan)
+        self.assertIn("不可伪造的安全边界", implementation_plan)
+        self.assertNotIn("本轮禁止修改 README", implementation_plan)
+
+        frontend = (ROOT / "src" / "main.js").read_text(encoding="utf-8")
+        self.assertIn("配置成功后 Key 会写入当前 Friend profile", frontend)
+        self.assertIn("本工具设置、日志和恢复 manifest 不另存或回显", frontend)
+        self.assertNotIn("不会回显、落盘或进入日志", frontend)
+
+    def test_scanner_passes_clean_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = self._git_repository(Path(temporary))
+            result = run_command(["bash", str(SCAN), str(repository)])
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_scanner_rejects_source_secret_without_echoing_value(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = self._git_repository(Path(temporary))
+            secret = "sk-" + ("A" * 24)
+            write_file(repository / "src" / "main.js", "const value = " + repr(secret) + ";\n")
+            result = run_command(["bash", str(SCAN), str(repository)])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn(secret, result.stdout + result.stderr)
+
+    def test_scanner_covers_ignored_and_document_source_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = self._git_repository(Path(temporary))
+            write_file(repository / ".gitignore", ".env\nnew-api-deployment/ignored.env\n")
+            self._git(repository, "add", ".gitignore")
+            self._git(repository, "commit", "-m", "fixture ignore rules")
+
+            secret = "sk-" + ("C" * 24)
+            paths = (
+                "new-api-deployment/README.md",
+                "new-api-deployment/ignored.env",
+                "payment-control-plane/control_plane.py",
+                "README.md",
+                "IMPLEMENTATION_PLAN.md",
+                ".env",
+            )
+            for relative_path in paths:
+                path = repository / relative_path
+                try:
+                    if relative_path == ".env":
+                        content = "MYSQL_PASSWORD=" + ("C" * 24) + "\n"
+                    else:
+                        content = "value = " + repr(secret) + "\n"
+                    write_file(path, content)
+                    result = run_command(["bash", str(SCAN), str(repository)])
+                    self.assertNotEqual(result.returncode, 0, relative_path)
+                    self.assertNotIn(secret, result.stdout + result.stderr, relative_path)
+                finally:
+                    path.unlink(missing_ok=True)
+
+    def test_scanner_covers_app_bundle_and_external_mounted_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = self._git_repository(Path(temporary))
+            secret = "sk-" + ("D" * 24)
+            bundle_resource = (
+                repository
+                / "src-tauri"
+                / "target"
+                / "release"
+                / "bundle"
+                / "macos"
+                / "Friend Claude.app"
+                / "Contents"
+                / "Resources"
+                / "config.json"
+            )
+            write_file(bundle_resource, "value = " + repr(secret) + "\n")
+            result = run_command(["bash", str(SCAN), str(repository)])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn(secret, result.stdout + result.stderr)
+
+            shutil.rmtree(repository / "src-tauri")
+            mounted_bundle = (
+                repository
+                / "mounted-dmg"
+                / "Friend Claude.app"
+                / "Contents"
+                / "Resources"
+                / "config.json"
+            )
+            write_file(mounted_bundle, "value = " + repr(secret) + "\n")
+            result = run_command(["bash", str(SCAN), str(repository), str(repository / "mounted-dmg")])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn(secret, result.stdout + result.stderr)
+
+    def test_scanner_rejects_git_history_after_worktree_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = self._git_repository(Path(temporary))
+            secret = "sk-" + ("B" * 24)
+            source = repository / "src" / "history.js"
+            write_file(source, "const value = " + repr(secret) + ";\n")
+            self._git(repository, "add", ".")
+            self._git(repository, "commit", "-m", "temporary fixture")
+            write_file(source, "const value = 'clean';\n")
+            result = run_command(["bash", str(SCAN), str(repository)])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn(secret, result.stdout + result.stderr)
+
+    def test_scanner_rejects_artifact_marker_and_complete_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = self._git_repository(Path(temporary))
+            marker = "local_" + "flow_id"
+            write_file(repository / "dist" / "unpacked" / "config.json", json.dumps({"marker": marker}))
+            result = run_command(["bash", str(SCAN), str(repository)])
+            self.assertNotEqual(result.returncode, 0)
+
+            shutil.rmtree(repository / "dist")
+            write_file(repository / "release" / "request.log", "redacted fixture")
+            result = run_command(["bash", str(SCAN), str(repository)])
+            self.assertNotEqual(result.returncode, 0)
+
+    @staticmethod
+    def _git_repository(path: Path) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        run_command(["git", "init", "-q"], cwd=path)
+        run_command(["git", "config", "user.email", "release-gate@example.invalid"], cwd=path)
+        run_command(["git", "config", "user.name", "release-gate-test"], cwd=path)
+        write_file(path / "src" / "main.js", "const value = 'clean';\n")
+        write_file(
+            path / "new-api-deployment" / ".env.example",
+            "MYSQL_PASSWORD=replace-with-runtime-secret\n",
+        )
+        run_command(["git", "add", "."], cwd=path)
+        run_command(["git", "commit", "-qm", "fixture baseline"], cwd=path)
+        return path
+
+    @staticmethod
+    def _git(repository: Path, *arguments: str) -> None:
+        result = run_command(["git", *arguments], cwd=repository)
+        if result.returncode != 0:
+            raise AssertionError(result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

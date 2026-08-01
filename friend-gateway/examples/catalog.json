@@ -1,0 +1,19 @@
+{
+  "catalog_version": "v1a-mock-1",
+  "expires_at": "2099-01-01T00:00:00Z",
+  "catalog": [
+    {
+      "product": "claude",
+      "protocol": "anthropic-messages",
+      "canonical_id": "claude.default",
+      "model_ref": "friend-model:claude-mock",
+      "gateway_ref": "friend-fixed-gateway",
+      "display_name": "Claude mock",
+      "capabilities": ["streaming", "tool_use"],
+      "default": true,
+      "catalog_version": "v1a-mock-1",
+      "expires_at": "2099-01-01T00:00:00Z",
+      "billing_label": "mock only"
+    }
+  ]
+}

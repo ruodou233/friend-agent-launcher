@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "cn.ruodou.friend-agent-launcher",
   "build": {
-    "beforeBuildCommand": "npm run build:claude",
+    "beforeBuildCommand": "python3 scripts/verify-release-support.py --product claude --system macos --action build --require-host macos --require-wrapper && npm run build:claude",
     "frontendDist": "../dist/claude"
   },
   "app": {
@@ -23,7 +23,7 @@
     }
   },
   "bundle": {
-    "active": true,
+    "active": false,
     "targets": "all",
     "icon": [
       "icons/32x32.png",

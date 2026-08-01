@@ -3,7 +3,7 @@
   "productName": "Friend Codex",
   "identifier": "cn.ruodou.friend-codex-launcher",
   "build": {
-    "beforeBuildCommand": "npm run build:codex",
+    "beforeBuildCommand": "python3 scripts/verify-release-support.py --product codex --system macos --action build --require-host macos && npm run build:codex",
     "frontendDist": "../dist/codex"
   },
   "app": {
@@ -14,7 +14,8 @@
     ]
   },
   "bundle": {
-    "shortDescription": "配置并打开原版 Codex",
-    "longDescription": "无需学习 Provider 或 CC Switch，粘贴 Key 后直接使用原版 ChatGPT / Codex。"
+    "active": false,
+    "shortDescription": "Codex research / blocked（不发布）",
+    "longDescription": "Codex 仅保留脱敏研究入口；V1A blocked，不生成或发布 Codex 安装包。手工 Tauri 构建也必须先通过 release gate。"
   }
 }

@@ -3,7 +3,7 @@
   "productName": "Friend Claude",
   "identifier": "cn.ruodou.friend-claude-launcher",
   "build": {
-    "beforeBuildCommand": "npm run build:claude",
+    "beforeBuildCommand": "python3 scripts/verify-release-support.py --product claude --system macos --action build --require-host macos --require-wrapper && npm run build:claude",
     "frontendDist": "../dist/claude"
   },
   "app": {
@@ -14,7 +14,9 @@
     ]
   },
   "bundle": {
+    "active": true,
+    "targets": ["dmg"],
     "shortDescription": "配置并打开原版 Claude Desktop",
-    "longDescription": "无需学习 Provider 或 CC Switch，粘贴 Key 后直接使用原版 Claude Desktop。"
+    "longDescription": "仅供已安装官方 Claude Desktop 的 macOS 本地 candidate 验证；不代表已通过朋友分发门禁。"
   }
 }

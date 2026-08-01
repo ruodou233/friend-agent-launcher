@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "node_major": 22,
+    "candidate_upload": false,
+    "friend_upload_requires": [
+      "status=go",
+      "p0_evidence_digest"
+    ]
+  },
+  "targets": [
+    {
+      "product": "claude",
+      "system": "macos",
+      "status": "candidate",
+      "channel": "local-ci-only",
+      "p0_evidence_digest": null
+    },
+    {
+      "product": "claude",
+      "system": "windows",
+      "status": "blocked",
+      "channel": "blocked",
+      "p0_evidence_digest": null
+    },
+    {
+      "product": "codex",
+      "system": "macos",
+      "status": "blocked",
+      "channel": "blocked",
+      "p0_evidence_digest": null
+    },
+    {
+      "product": "codex",
+      "system": "windows",
+      "status": "blocked",
+      "channel": "blocked",
+      "p0_evidence_digest": null
+    }
+  ]
+}

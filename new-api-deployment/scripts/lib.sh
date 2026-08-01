@@ -69,6 +69,12 @@ load_required_env() {
   export NEW_API_IMAGE="$(required_env NEW_API_IMAGE)"
   export NEW_API_PORT="$(required_env NEW_API_PORT)"
   export NEW_API_UPSTREAM_PROVIDER="$(required_env NEW_API_UPSTREAM_PROVIDER)"
+  export FRIEND_GATEWAY_MODE="$(required_env FRIEND_GATEWAY_MODE)"
+  export FRIEND_GATEWAY_PORT="$(required_env FRIEND_GATEWAY_PORT)"
+  export FRIEND_GATEWAY_CATALOG_FILE="$(required_env FRIEND_GATEWAY_CATALOG_FILE)"
+  export FRIEND_GATEWAY_KEY_BINDINGS_FILE="$(required_env FRIEND_GATEWAY_KEY_BINDINGS_FILE)"
+  export FRIEND_GATEWAY_UPSTREAM_BASE_URL="$(required_env FRIEND_GATEWAY_UPSTREAM_BASE_URL)"
+  export FRIEND_GATEWAY_BALANCE_ADAPTER_URL="$(required_env FRIEND_GATEWAY_BALANCE_ADAPTER_URL)"
   export MYSQL_DATABASE="$(required_env MYSQL_DATABASE)"
   export MYSQL_USER="$(required_env MYSQL_USER)"
   export MYSQL_PASSWORD="$(required_env MYSQL_PASSWORD)"
@@ -78,6 +84,10 @@ load_required_env() {
 
   reject_placeholder PUBLIC_HOST "$PUBLIC_HOST"
   reject_placeholder NEW_API_IMAGE "$NEW_API_IMAGE"
+  case "$FRIEND_GATEWAY_MODE" in
+    mock|proxy) ;;
+    *) die "FRIEND_GATEWAY_MODE must be mock or proxy" ;;
+  esac
   reject_placeholder MYSQL_PASSWORD "$MYSQL_PASSWORD"
   reject_placeholder MYSQL_ROOT_PASSWORD "$MYSQL_ROOT_PASSWORD"
   reject_placeholder NEW_API_SESSION_SECRET "$NEW_API_SESSION_SECRET"
@@ -85,6 +95,12 @@ load_required_env() {
   [[ "$PUBLIC_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || die "PUBLIC_HOST must be a hostname without scheme or path"
   [[ "$NEW_API_PORT" =~ ^[0-9]+$ ]] || die "NEW_API_PORT must be numeric"
   [ "$NEW_API_PORT" -ge 1 ] && [ "$NEW_API_PORT" -le 65535 ] || die "NEW_API_PORT is out of range"
+  [[ "$FRIEND_GATEWAY_PORT" =~ ^[0-9]+$ ]] || die "FRIEND_GATEWAY_PORT must be numeric"
+  [ "$FRIEND_GATEWAY_PORT" -ge 1 ] && [ "$FRIEND_GATEWAY_PORT" -le 65535 ] || die "FRIEND_GATEWAY_PORT is out of range"
+  case "$FRIEND_GATEWAY_CATALOG_FILE:$FRIEND_GATEWAY_KEY_BINDINGS_FILE" in
+    /app/config/catalog.json:/app/config/key-bindings.json) ;;
+    *) die "Friend gateway fixture paths must stay at /app/config" ;;
+  esac
   [[ "$BACKUP_DIR" != *..* ]] || die "BACKUP_DIR must not contain .."
   [[ "$BACKUP_DIR" != *[[:space:]]* ]] || die "BACKUP_DIR must not contain whitespace"
   case "$BACKUP_DIR" in
