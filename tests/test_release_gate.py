@@ -64,8 +64,38 @@ def git_bash_path(path: Path) -> str:
     return path.as_posix()
 
 
+def git_bash_executable() -> str:
+    """Return an executable for Git Bash, never WSL Bash on Windows."""
+
+    if os.name != "nt":
+        return "bash"
+
+    candidates: List[Path] = []
+    git_executable = shutil.which("git")
+    if git_executable:
+        git_path = Path(git_executable)
+        if git_path.parent.name.lower() in {"cmd", "bin"}:
+            candidates.append(git_path.parent.parent / "bin" / "bash.exe")
+
+    for variable in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        program_files = os.environ.get(variable)
+        if program_files:
+            candidates.append(Path(program_files) / "Git" / "bin" / "bash.exe")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+
+    located_git = repr(git_executable) if git_executable else "not found"
+    raise RuntimeError(
+        "Git for Windows bash.exe could not be located; "
+        f"shutil.which('git') returned {located_git}. "
+        "Install Git for Windows or ensure its git.exe is on PATH."
+    )
+
+
 def run_scan(repository: Path, *artifact_paths: Path) -> subprocess.CompletedProcess:
-    command = ["bash", git_bash_path(SCAN), git_bash_path(repository)]
+    command = [git_bash_executable(), git_bash_path(SCAN), git_bash_path(repository)]
     command.extend(git_bash_path(path) for path in artifact_paths)
     return run_command(command)
 
@@ -131,7 +161,15 @@ class ReleaseSupportTests(unittest.TestCase):
         )
 
     def test_git_bash_path_preserves_drive_relative_path(self) -> None:
-        self.assertEqual(git_bash_path(Path(r"D:relative\file")), r"D:relative\file")
+        input_path = Path(r"D:relative\file")
+        converted_path = git_bash_path(input_path)
+        self.assertEqual(converted_path, input_path.as_posix())
+        self.assertNotEqual(converted_path, "/d/relative/file")
+
+    def test_git_bash_executable_uses_bash_on_non_windows(self) -> None:
+        if os.name == "nt":
+            self.skipTest("non-Windows executable selection")
+        self.assertEqual(git_bash_executable(), "bash")
 
     def test_git_bash_path_preserves_posix_path(self) -> None:
         path = Path("/a/friend-agent-launcher/scripts/scan-secrets.sh")
