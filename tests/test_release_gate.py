@@ -47,6 +47,18 @@ def run_verify(
     return run_command(command, env=env)
 
 
+def git_bash_path(path: Path) -> str:
+    """Pass a path to Git Bash without Windows backslashes."""
+
+    return path.as_posix()
+
+
+def run_scan(repository: Path, *artifact_paths: Path) -> subprocess.CompletedProcess:
+    command = ["bash", git_bash_path(SCAN), git_bash_path(repository)]
+    command.extend(git_bash_path(path) for path in artifact_paths)
+    return run_command(command)
+
+
 def write_file(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -145,6 +157,32 @@ class ReleaseSupportTests(unittest.TestCase):
         self.assertIn("find \"$cargo_target_dir\" -depth -delete", macos_script)
         self.assertNotIn("src-tauri/target/release/bundle", macos_script)
         self.assertNotIn("rm -rf", macos_script)
+
+    def test_candidate_bundle_allows_tauri_cleaned_macos_staging(self) -> None:
+        verifier = load_verify_module()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "target" / "release" / "bundle"
+            expected_dmg = bundle / "dmg" / verifier.CANDIDATE_DMG_NAME
+            write_file(expected_dmg, "claude dmg fixture")
+
+            self.assertFalse((bundle / "macos").exists())
+            self.assertEqual(verifier.validate_candidate_bundle(bundle), expected_dmg)
+
+            write_file(bundle / "release-notes.txt", "unexpected root entry")
+            with self.assertRaises(verifier.ReleaseGateError):
+                verifier.validate_candidate_bundle(bundle)
+
+    def test_candidate_bundle_rejects_empty_macos_staging(self) -> None:
+        verifier = load_verify_module()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "target" / "release" / "bundle"
+            write_file(bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
+            (bundle / "macos").mkdir(parents=True)
+
+            with self.assertRaises(verifier.ReleaseGateError):
+                verifier.validate_candidate_bundle(bundle)
 
     def test_candidate_allowlist_rejects_extra_and_codex_artifacts(self) -> None:
         verifier = load_verify_module()
@@ -271,6 +309,21 @@ class ReleaseSupportTests(unittest.TestCase):
 
                     with self.assertRaises(verifier.ReleaseGateError):
                         verifier.validate_candidate_bundle(bundle)
+
+    def test_candidate_allowlist_rejects_unsupported_entries(self) -> None:
+        verifier = load_verify_module()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "target" / "release" / "bundle"
+            write_file(bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
+            unsupported = bundle / "dmg" / "named-pipe"
+            try:
+                os.mkfifo(unsupported)
+            except (AttributeError, NotImplementedError, OSError) as error:
+                raise unittest.SkipTest(f"FIFOs are unavailable: {error}") from error
+
+            with self.assertRaises(verifier.ReleaseGateError):
+                verifier.validate_candidate_bundle(bundle)
 
     def test_release_directory_allowlist_rejects_extra_entries(self) -> None:
         verifier = load_verify_module()
@@ -510,16 +563,20 @@ class ReleaseSupportTests(unittest.TestCase):
     def test_scanner_passes_clean_repository(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = self._git_repository(Path(temporary))
-            result = run_command(["bash", str(SCAN), str(repository)])
+            result = run_scan(repository)
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("release scan: PASS:", result.stdout)
 
     def test_scanner_rejects_source_secret_without_echoing_value(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = self._git_repository(Path(temporary))
             secret = "sk-" + ("A" * 24)
             write_file(repository / "src" / "main.js", "const value = " + repr(secret) + ";\n")
-            result = run_command(["bash", str(SCAN), str(repository)])
-            self.assertNotEqual(result.returncode, 0)
+            result = run_scan(repository)
+            self.assert_scanner_blocked(
+                result,
+                "sensitive value or forbidden runtime marker in repository source boundary; contents withheld",
+            )
             self.assertNotIn(secret, result.stdout + result.stderr)
 
     def test_scanner_covers_ignored_and_document_source_boundaries(self) -> None:
@@ -546,15 +603,19 @@ class ReleaseSupportTests(unittest.TestCase):
                     else:
                         content = "value = " + repr(secret) + "\n"
                     write_file(path, content)
-                    result = run_command(["bash", str(SCAN), str(repository)])
-                    self.assertNotEqual(result.returncode, 0, relative_path)
+                    result = run_scan(repository)
+                    self.assert_scanner_blocked(
+                        result,
+                        "sensitive value or forbidden runtime marker in repository source boundary; contents withheld",
+                    )
                     self.assertNotIn(secret, result.stdout + result.stderr, relative_path)
                 finally:
                     path.unlink(missing_ok=True)
 
     def test_scanner_covers_app_bundle_and_external_mounted_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            repository = self._git_repository(Path(temporary))
+            temporary_root = Path(temporary)
+            repository = self._git_repository(temporary_root / "repository")
             secret = "sk-" + ("D" * 24)
             bundle_resource = (
                 repository
@@ -569,13 +630,16 @@ class ReleaseSupportTests(unittest.TestCase):
                 / "config.json"
             )
             write_file(bundle_resource, "value = " + repr(secret) + "\n")
-            result = run_command(["bash", str(SCAN), str(repository)])
-            self.assertNotEqual(result.returncode, 0)
+            result = run_scan(repository)
+            self.assert_scanner_blocked(
+                result,
+                "sensitive value or forbidden runtime marker in unpacked/artifact paths; contents withheld",
+            )
             self.assertNotIn(secret, result.stdout + result.stderr)
 
             shutil.rmtree(repository / "src-tauri")
             mounted_bundle = (
-                repository
+                temporary_root
                 / "mounted-dmg"
                 / "Friend Claude.app"
                 / "Contents"
@@ -583,8 +647,11 @@ class ReleaseSupportTests(unittest.TestCase):
                 / "config.json"
             )
             write_file(mounted_bundle, "value = " + repr(secret) + "\n")
-            result = run_command(["bash", str(SCAN), str(repository), str(repository / "mounted-dmg")])
-            self.assertNotEqual(result.returncode, 0)
+            result = run_scan(repository, temporary_root / "mounted-dmg")
+            self.assert_scanner_blocked(
+                result,
+                "sensitive value or forbidden runtime marker in unpacked/artifact paths; contents withheld",
+            )
             self.assertNotIn(secret, result.stdout + result.stderr)
 
     def test_scanner_rejects_git_history_after_worktree_cleanup(self) -> None:
@@ -596,8 +663,11 @@ class ReleaseSupportTests(unittest.TestCase):
             self._git(repository, "add", ".")
             self._git(repository, "commit", "-m", "temporary fixture")
             write_file(source, "const value = 'clean';\n")
-            result = run_command(["bash", str(SCAN), str(repository)])
-            self.assertNotEqual(result.returncode, 0)
+            result = run_scan(repository)
+            self.assert_scanner_blocked(
+                result,
+                "sensitive value or forbidden marker in Git history; contents withheld",
+            )
             self.assertNotIn(secret, result.stdout + result.stderr)
 
     def test_scanner_rejects_artifact_marker_and_complete_log(self) -> None:
@@ -605,13 +675,25 @@ class ReleaseSupportTests(unittest.TestCase):
             repository = self._git_repository(Path(temporary))
             marker = "local_" + "flow_id"
             write_file(repository / "dist" / "unpacked" / "config.json", json.dumps({"marker": marker}))
-            result = run_command(["bash", str(SCAN), str(repository)])
-            self.assertNotEqual(result.returncode, 0)
+            result = run_scan(repository)
+            self.assert_scanner_blocked(
+                result,
+                "sensitive value or forbidden runtime marker in unpacked/artifact paths; contents withheld",
+            )
 
             shutil.rmtree(repository / "dist")
             write_file(repository / "release" / "request.log", "redacted fixture")
-            result = run_command(["bash", str(SCAN), str(repository)])
-            self.assertNotEqual(result.returncode, 0)
+            result = run_scan(repository)
+            self.assert_scanner_blocked(
+                result,
+                "complete-log file found in unpacked or artifact paths",
+            )
+
+    def assert_scanner_blocked(
+        self, result: subprocess.CompletedProcess, message: str
+    ) -> None:
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"release scan: BLOCKED: {message}", result.stderr)
 
     @staticmethod
     def _git_repository(path: Path) -> Path:

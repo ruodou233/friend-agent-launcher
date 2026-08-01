@@ -31,6 +31,8 @@ CANDIDATE_DMG_NAME = "Friend Claude_0.1.0_aarch64.dmg"
 RELEASE_CANDIDATE_DMG_NAME = "Friend-Claude-0.1.0-macos-arm64-candidate.dmg"
 RELEASE_CHECKSUM_NAME = "SHA256SUMS-candidate.txt"
 EXPECTED_CLAUDE_APP = Path("macos") / "Friend Claude.app"
+# Tauri may remove the macOS .app staging tree after it creates the DMG. Keep
+# both names as the complete root allowlist, while requiring dmg/ below.
 CANDIDATE_ROOT_ENTRIES = frozenset({"dmg", "macos"})
 
 
@@ -201,13 +203,18 @@ def _is_real_directory(path: Path) -> bool:
 
 
 def validate_candidate_bundle(bundle_dir: Path) -> Path:
-    """Validate the fresh Tauri bundle and return the only DMG to copy."""
+    """Validate a fresh Tauri bundle and return the only DMG to copy.
+
+    Tauri may remove the macOS app staging tree after creating the DMG, so
+    macos/ is optional while the DMG allowlist remains mandatory.
+    """
 
     tree = list(_walk_without_symlinks(bundle_dir, "candidate bundle"))
 
     root_entries = [path for path in tree if path.parent == bundle_dir]
-    if {path.name for path in root_entries} != CANDIDATE_ROOT_ENTRIES:
-        raise ReleaseGateError("candidate bundle root must contain only dmg/ and macos/")
+    root_entry_names = {path.name for path in root_entries}
+    if "dmg" not in root_entry_names or not root_entry_names <= CANDIDATE_ROOT_ENTRIES:
+        raise ReleaseGateError("candidate bundle root must contain dmg/ and optional macos/")
     if any(not _is_real_directory(path) for path in root_entries):
         raise ReleaseGateError("candidate bundle root entries must be directories")
 
@@ -219,11 +226,12 @@ def validate_candidate_bundle(bundle_dir: Path) -> Path:
     if not _is_real_file(dmg_entries[0]):
         raise ReleaseGateError("expected Claude DMG must be a regular file")
 
-    macos_entries = [path for path in tree if path.parent == macos_dir]
-    if len(macos_entries) != 1 or macos_entries[0].name != EXPECTED_CLAUDE_APP.name:
-        raise ReleaseGateError("candidate macos/ must contain only Friend Claude.app")
-    if not _is_real_directory(macos_entries[0]):
-        raise ReleaseGateError("Friend Claude.app must be a directory")
+    if macos_dir in root_entries:
+        macos_entries = [path for path in tree if path.parent == macos_dir]
+        if len(macos_entries) != 1 or macos_entries[0].name != EXPECTED_CLAUDE_APP.name:
+            raise ReleaseGateError("candidate macos/ must contain only Friend Claude.app")
+        if not _is_real_directory(macos_entries[0]):
+            raise ReleaseGateError("Friend Claude.app must be a directory")
 
     return dmg_entries[0]
 
