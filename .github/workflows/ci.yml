@@ -21,40 +21,72 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
       - uses: dtolnay/rust-toolchain@stable
       - name: Install frontend dependencies
         run: npm ci
       - name: Build both frontends
         run: npm run build:claude && npm run build:codex
-      - name: Run Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
-      - name: Scan source for common secrets
+      - name: Run Friend gateway tests without credentials
+        run: python friend-gateway/tests/test_gateway.py
+      - name: Validate OpenAPI contract
+        run: python contracts/validate_contract.py
+      - name: Verify payment control plane
         shell: bash
         run: |
-          if grep -RInE \
-            --exclude-dir=.git \
-            --exclude-dir=node_modules \
-            --exclude-dir=target \
-            --exclude='package-lock.json' \
-            '(sk-[A-Za-z0-9_-]{16,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|password[[:space:]]*[:=][[:space:]]*[^[:space:]]+)' .; then
-            echo "Potential secret found"
-            exit 1
+          if ! command -v python3 >/dev/null 2>&1; then
+            python3() { python "$@"; }
+            export -f python3
           fi
-      - name: Build macOS installers
+          bash payment-control-plane/verify.sh
+      - name: Validate deployment templates without a VPS
+        run: python tests/test_deployment_static.py
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - name: Run Rust release tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --release
+      - name: Ensure ripgrep is available for release scans
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rg >/dev/null 2>&1; then
+            case "$RUNNER_OS" in
+              macOS)
+                command -v brew >/dev/null 2>&1 || {
+                  echo "release scan: BLOCKED: Homebrew is required to install rg on macOS" >&2
+                  exit 1
+                }
+                brew install ripgrep
+                ;;
+              Windows)
+                command -v choco >/dev/null 2>&1 || {
+                  echo "release scan: BLOCKED: Chocolatey is required to install rg on Windows" >&2
+                  exit 1
+                }
+                choco install ripgrep --no-progress --yes
+                ;;
+              *)
+                echo "release scan: BLOCKED: unsupported runner for rg installation: $RUNNER_OS" >&2
+                exit 1
+                ;;
+            esac
+          fi
+          command -v rg >/dev/null 2>&1 || {
+            echo "release scan: BLOCKED: rg is unavailable after installation" >&2
+            exit 1
+          }
+          rg --version
+      - name: Run release gate tests
+        shell: bash
+        run: python tests/test_release_gate.py
+      - name: Scan source, Git history, and artifact paths
+        shell: bash
+        run: bash scripts/scan-secrets.sh
+      - name: Build Claude macOS local candidate
         if: runner.os == 'macOS'
         run: npm run desktop:build:macos
-      - name: Build Windows installers
-        if: runner.os == 'Windows'
-        run: npm run desktop:build:windows
-      - name: Upload macOS developer beta
-        if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
-        with:
-          name: friend-agent-macos
-          path: release/macos/
-      - name: Upload Windows developer beta
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: friend-agent-windows
-          path: release/windows/
+      - name: Re-scan generated candidate paths
+        shell: bash
+        run: bash scripts/scan-secrets.sh

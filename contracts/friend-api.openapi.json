@@ -53,8 +53,8 @@
     "/v1/friend/catalog": {
       "post": {
         "operationId": "friendCatalog",
-        "summary": "Return the server-signed fixed catalog and current New API balance",
-        "description": "Bearer Friend Key is required. account_id is derived from the presented key and is never accepted from the request body, query, path, or a caller-controlled header. The service does not persist plaintext keys. Catalog model_ref, protocol, gateway_ref, version, expiry, and signature are server-issued and must be verified by the Rust client.",
+        "summary": "Return the fixed catalog and current New API balance",
+        "description": "Bearer Friend Key is required. account_id and install_id are derived from the key metadata and are never accepted from the public request body, query, path, or a caller-controlled header. The service does not persist plaintext keys. The Rust client trusts only the fixed HTTPS origin, deny_unknown_fields-compatible wire shape, the V1A version prefix, the tls-fixed-gateway trust marker, and expiry.",
         "tags": ["public"],
         "security": [{ "BearerFriendKey": [] }],
         "x-public": true,
@@ -73,7 +73,7 @@
         },
         "responses": {
           "200": {
-            "description": "Signed catalog and current balance",
+            "description": "Fixed catalog and current balance",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/CatalogResponse" }
@@ -93,7 +93,7 @@
       "get": {
         "operationId": "friendBalance",
         "summary": "Read the current New API balance",
-        "description": "Bearer Friend Key is required. The response is a read-through of New API; the Friend control plane does not create a second balance ledger. account_id is derived from the key and cannot be supplied or overridden by the caller.",
+        "description": "Bearer Friend Key is required. The response is a read-through of New API; the Friend control plane does not create a second balance ledger. account_id and install_id are derived from key metadata and cannot be supplied or overridden by the public caller.",
         "tags": ["public"],
         "security": [{ "BearerFriendKey": [] }],
         "x-public": true,
@@ -122,7 +122,7 @@
       "post": {
         "operationId": "anthropicMessages",
         "summary": "V1A Anthropic Messages generation entry point",
-        "description": "Bearer Friend Key is required. Only the fixed LowcostAI V1A route represented by a server-issued friend-model model_ref is accepted. The gateway never automatically retries or transparently replays a generation POST, never switches route after an upstream acceptance signal, and never accepts account_id, endpoint, provider, or a bare upstream model name from the request.",
+        "description": "Bearer Friend Key is required. Only the fixed LowcostAI V1A route represented by a server-issued friend-model model_ref is accepted. The gateway never automatically retries or transparently replays a generation POST, never switches route after an upstream acceptance signal, and never accepts account_id, install_id, endpoint, provider, or a bare upstream model name from the request.",
         "tags": ["public"],
         "security": [{ "BearerFriendKey": [] }],
         "x-public": true,
@@ -315,7 +315,7 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "Friend-Key-v1",
-        "description": "Only for POST /v1/friend/catalog, GET /v1/friend/balance, and POST /v1/messages. Send only as Authorization: Bearer <Friend Key>; never in query, cookie, request body, account_id, or a caller-controlled routing header. The server derives account_id from this key."
+        "description": "Only for POST /v1/friend/catalog, GET /v1/friend/balance, and POST /v1/messages. Send only as Authorization: Bearer <Friend Key>; never in query, cookie, request body, account_id, install_id, or a caller-controlled routing header. The server derives account_id and install_id from this key."
       },
       "InternalMTLS": {
         "type": "mutualTLS",
@@ -439,26 +439,26 @@
       "CatalogRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["product", "protocol", "install_id"],
+        "required": ["product", "protocol"],
         "properties": {
           "product": { "type": "string", "const": "claude" },
-          "protocol": { "type": "string", "const": "anthropic-messages" },
-          "install_id": { "$ref": "#/components/schemas/InstallId" }
+          "protocol": { "type": "string", "const": "anthropic-messages" }
         }
       },
       "CatalogResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["request_id", "account_id", "catalog_version", "expires_at", "catalog", "balance"],
+        "required": ["product", "protocol", "catalog_version", "expires_at", "integrity", "catalog", "balance"],
         "properties": {
-          "request_id": { "$ref": "#/components/schemas/RequestIdValue" },
-          "account_id": {
-            "$ref": "#/components/schemas/AccountId",
-            "readOnly": true,
-            "description": "Server-derived from the Bearer Friend Key; never accepted from the caller."
-          },
+          "product": { "type": "string", "const": "claude" },
+          "protocol": { "type": "string", "const": "anthropic-messages" },
           "catalog_version": { "$ref": "#/components/schemas/CatalogVersion" },
           "expires_at": { "type": "string", "format": "date-time" },
+          "integrity": {
+            "type": "string",
+            "const": "tls-fixed-gateway",
+            "description": "Transport and schema trust marker; this is not a cryptographic assertion."
+          },
           "catalog": {
             "type": "array",
             "minItems": 1,
@@ -481,8 +481,7 @@
           "default",
           "catalog_version",
           "expires_at",
-          "billing_label",
-          "signature"
+          "billing_label"
         ],
         "properties": {
           "product": { "type": "string", "const": "claude" },
@@ -510,20 +509,15 @@
           "display_name": { "type": "string", "minLength": 1, "maxLength": 128 },
           "capabilities": {
             "type": "array",
+            "minItems": 1,
             "uniqueItems": true,
+            "contains": { "const": "streaming" },
             "items": { "type": "string", "enum": ["streaming", "tool_use"] }
           },
           "default": { "type": "boolean" },
           "catalog_version": { "$ref": "#/components/schemas/CatalogVersion" },
           "expires_at": { "type": "string", "format": "date-time" },
-          "billing_label": { "type": "string", "minLength": 1, "maxLength": 128 },
-          "signature": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 1024,
-            "readOnly": true,
-            "description": "Server signature over the catalog entry; no key material is included in this contract."
-          }
+          "billing_label": { "type": "string", "minLength": 1, "maxLength": 128 }
         }
       },
       "BalanceSnapshot": {
@@ -544,14 +538,9 @@
       "BalanceResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["request_id", "account_id", "balance"],
+        "required": ["product", "balance"],
         "properties": {
-          "request_id": { "$ref": "#/components/schemas/RequestIdValue" },
-          "account_id": {
-            "$ref": "#/components/schemas/AccountId",
-            "readOnly": true,
-            "description": "Server-derived from the Bearer Friend Key; never accepted from the caller."
-          },
+          "product": { "type": "string", "const": "claude" },
           "balance": { "$ref": "#/components/schemas/BalanceSnapshot" }
         }
       },
@@ -565,7 +554,7 @@
             "minLength": 1,
             "maxLength": 128,
             "pattern": "^friend-model:[A-Za-z0-9][A-Za-z0-9._:-]{0,110}$",
-            "description": "Must be a currently valid server-issued model_ref from the signed catalog."
+            "description": "Must be a currently valid model_ref from the fixed catalog."
           },
           "max_tokens": { "type": "integer", "minimum": 1, "maximum": 200000 },
           "messages": {
@@ -825,7 +814,7 @@
         "type": "string",
         "minLength": 1,
         "maxLength": 64,
-        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+        "pattern": "^v1a-[A-Za-z0-9][A-Za-z0-9._:-]{0,59}$"
       },
       "ModelRef": {
         "type": "string",

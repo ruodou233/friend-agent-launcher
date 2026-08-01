@@ -18,6 +18,10 @@ use toml_edit::{value, DocumentMut, Item, Table};
 
 const KEYRING_SERVICE: &str = "cn.ruodou.friend-agent-launcher";
 const CODEX_PROVIDER_ID: &str = "friend_gateway";
+const CLAUDE_BUNDLE_IDENTIFIER: &str = "com.anthropic.claudefordesktop";
+const CLAUDE_TEAM_IDENTIFIER: &str = "Q6L2SF6YDW";
+const CLAUDE_DEVELOPER_IDENTITY: &str = "Developer ID Application: Anthropic PBC (Q6L2SF6YDW)";
+const CLAUDE_NOTARIZATION_SOURCE: &str = "source=Notarized Developer ID";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Product {
@@ -39,7 +43,13 @@ struct LauncherStatus {
     official_app_installed: bool,
     official_app_running: bool,
     official_app_version: Option<String>,
+    official_app_error: Option<String>,
     gateway_configured: bool,
+}
+
+#[derive(Debug, Clone)]
+struct OfficialAppIdentity {
+    version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,8 +251,170 @@ fn official_app_path(product: Product) -> Option<PathBuf> {
     None
 }
 
+#[cfg(target_os = "macos")]
+fn mdls_value(path: &Path, attribute: &str, detection_item: &str) -> Result<String, String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| format!("官方 Claude 身份校验失败：{detection_item}路径无效"))?;
+    let output = Command::new("/usr/bin/mdls")
+        .args(["-raw", "-name", attribute, path])
+        .output()
+        .map_err(|_| format!("官方 Claude 身份校验失败：{detection_item}读取失败"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "官方 Claude 身份校验失败：{detection_item}读取失败"
+        ));
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() || value == "(null)" || value == "null" {
+        return Err(format!("官方 Claude 身份校验失败：{detection_item}缺失"));
+    }
+    Ok(value)
+}
+
+#[cfg(target_os = "macos")]
+fn signature_field<'a>(output: &'a str, prefix: &str) -> Option<&'a str> {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix).map(str::trim))
+}
+
+#[cfg(target_os = "macos")]
+fn validate_version(version: &str) -> Result<(), String> {
+    if version.is_empty()
+        || version.len() > 64
+        || !version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'+'))
+    {
+        return Err("官方 Claude 身份校验失败：版本读取结果无效".into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verify_claude_bundle(path: &Path) -> Result<OfficialAppIdentity, String> {
+    let bundle_identifier = mdls_value(path, "kMDItemCFBundleIdentifier", "bundle identifier")?;
+    if bundle_identifier != CLAUDE_BUNDLE_IDENTIFIER {
+        return Err(format!(
+            "官方 Claude 身份校验失败：bundle identifier 不匹配（检测到 {bundle_identifier}）"
+        ));
+    }
+
+    let bundle_path = path
+        .to_str()
+        .ok_or_else(|| "官方 Claude 身份校验失败：bundle 路径无效".to_string())?;
+    let verify = Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict", "--verbose=2", bundle_path])
+        .output()
+        .map_err(|_| "官方 Claude 身份校验失败：代码签名验证工具不可用".to_string())?;
+    if !verify.status.success() {
+        return Err("官方 Claude 身份校验失败：代码签名/信任验证未通过".into());
+    }
+
+    let display = Command::new("/usr/bin/codesign")
+        .args(["--display", "--verbose=4", bundle_path])
+        .output()
+        .map_err(|_| "官方 Claude 身份校验失败：代码签名元数据读取失败".to_string())?;
+    if !display.status.success() {
+        return Err("官方 Claude 身份校验失败：代码签名元数据读取失败".into());
+    }
+    let signature = String::from_utf8_lossy(&display.stderr);
+    if signature_field(&signature, "Identifier=") != Some(CLAUDE_BUNDLE_IDENTIFIER) {
+        return Err("官方 Claude 身份校验失败：代码签名 Identifier 不匹配".into());
+    }
+    if signature_field(&signature, "TeamIdentifier=") != Some(CLAUDE_TEAM_IDENTIFIER) {
+        return Err("官方 Claude 身份校验失败：代码签名 Team ID 不匹配".into());
+    }
+    if signature_field(&signature, "Authority=") != Some(CLAUDE_DEVELOPER_IDENTITY) {
+        return Err("官方 Claude 身份校验失败：Developer ID authority 不匹配".into());
+    }
+    if !signature.contains("Notarization Ticket=stapled") {
+        return Err("官方 Claude 身份校验失败：未检测到 stapled notarization ticket".into());
+    }
+
+    let trust = Command::new("/usr/sbin/spctl")
+        .args(["--assess", "--type", "execute", "--verbose=4", bundle_path])
+        .output()
+        .map_err(|_| "官方 Claude 身份校验失败：Apple trust 检测工具不可用".to_string())?;
+    let trust_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&trust.stdout),
+        String::from_utf8_lossy(&trust.stderr)
+    );
+    if !trust.status.success()
+        || !trust_output.contains("accepted")
+        || !trust_output.contains(CLAUDE_NOTARIZATION_SOURCE)
+    {
+        return Err(
+            "官方 Claude 身份校验失败：spctl 未确认 accepted / Notarized Developer ID".into(),
+        );
+    }
+
+    let version = mdls_value(path, "kMDItemVersion", "版本")?;
+    validate_version(&version)?;
+    Ok(OfficialAppIdentity {
+        version: Some(version),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn verified_claude_app() -> Result<OfficialAppIdentity, String> {
+    let mut candidates = vec![PathBuf::from("/Applications/Claude.app")];
+    if let Ok(home) = home_dir() {
+        candidates.push(home.join("Applications/Claude.app"));
+    }
+
+    let mut failures = Vec::new();
+    for candidate in candidates {
+        if !candidate.is_dir() {
+            continue;
+        }
+        match verify_claude_bundle(&candidate) {
+            Ok(identity) => return Ok(identity),
+            Err(error) => failures.push(error),
+        }
+    }
+    if failures.is_empty() {
+        Err("官方 Claude 身份校验失败：未找到候选 bundle（检测项：bundle 路径）".into())
+    } else {
+        Err(failures.join("；"))
+    }
+}
+
+fn official_app_identity(product: Product) -> Result<OfficialAppIdentity, String> {
+    #[cfg(target_os = "macos")]
+    {
+        if product == Product::Claude {
+            return verified_claude_app();
+        }
+        return official_app_path(product)
+            .map(|_| OfficialAppIdentity { version: None })
+            .ok_or_else(|| "尚未找到原版 App".into());
+    }
+    #[cfg(windows)]
+    {
+        return official_app_path(product)
+            .map(|_| OfficialAppIdentity { version: None })
+            .ok_or_else(|| "尚未找到原版 App".into());
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = product;
+        Err("当前系统暂不支持官方 App 身份检测".into())
+    }
+}
+
+fn official_app_status(product: Product) -> (bool, Option<String>, Option<String>) {
+    match official_app_identity(product) {
+        Ok(identity) => (true, identity.version, None),
+        Err(error) => (false, None, Some(error)),
+    }
+}
+
+#[allow(dead_code)]
 fn official_app_installed(product: Product) -> bool {
-    if official_app_path(product).is_some() {
+    if official_app_identity(product).is_ok() {
         return true;
     }
     #[cfg(windows)]
@@ -269,10 +441,13 @@ fn official_app_installed(product: Product) -> bool {
 #[tauri::command]
 fn launcher_status(app: AppHandle) -> Result<LauncherStatus, String> {
     let product = product(&app);
+    let (official_app_installed, official_app_version, official_app_error) =
+        official_app_status(product);
     Ok(LauncherStatus {
-        official_app_installed: official_app_installed(product),
+        official_app_installed,
         official_app_running: official_process_running(product),
-        official_app_version: None,
+        official_app_version,
+        official_app_error,
         gateway_configured: product == Product::Claude && gateway::fixed_gateway_url().is_ok(),
     })
 }
@@ -320,9 +495,7 @@ fn configure_and_launch(
             &request.canonical_id,
             &request.catalog_version,
         )?;
-        if !official_app_installed(Product::Claude) {
-            return Err("尚未安装原版 Claude，请先点击“下载原版 App”".into());
-        }
+        official_app_identity(Product::Claude)?;
         let paths = claude::default_paths()?;
         claude::configure(
             &paths,
@@ -330,7 +503,9 @@ fn configure_and_launch(
             &request.catalog_version,
             &gateway_url,
             &context.secret,
+            || ensure_official_app_stopped(Product::Claude),
             || launch_official(Product::Claude),
+            || close_official_if_running(Product::Claude),
         )
     })();
     // The context is dropped here on every branch; this explicit clear also
@@ -500,14 +675,14 @@ fn configure_codex(app: &AppHandle, endpoint: &str, model: &str) -> Result<(), S
 }
 
 fn launch_official(product: Product) -> Result<(), String> {
-    if !official_app_installed(product) {
-        return Err("尚未安装原版 App，请先点击“下载原版 App”".into());
-    }
-    close_official_if_running(product)?;
+    // Re-run the identity gate at the launch boundary; a path check is never
+    // enough to authorize opening or configuring the Claude candidate.
+    official_app_identity(product)?;
+    ensure_official_app_stopped(product)?;
     #[cfg(target_os = "macos")]
     {
         let bundle_id = if product == Product::Claude {
-            "com.anthropic.claudefordesktop"
+            CLAUDE_BUNDLE_IDENTIFIER
         } else {
             "com.openai.codex"
         };
@@ -544,6 +719,11 @@ fn launch_official(product: Product) -> Result<(), String> {
     }
     #[allow(unreachable_code)]
     Err("当前系统暂不支持自动打开官方 App".into())
+}
+
+fn ensure_official_app_stopped(product: Product) -> Result<(), String> {
+    official_app_identity(product)?;
+    close_official_if_running(product)
 }
 
 fn official_process_running(product: Product) -> bool {
@@ -587,14 +767,18 @@ fn close_official_if_running(product: Product) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let bundle_id = if product == Product::Claude {
-            "com.anthropic.claudefordesktop"
+            CLAUDE_BUNDLE_IDENTIFIER
         } else {
             "com.openai.codex"
         };
         let script = format!("tell application id \"{bundle_id}\" to quit");
-        let _ = Command::new("/usr/bin/osascript")
+        let status = Command::new("/usr/bin/osascript")
             .args(["-e", &script])
-            .status();
+            .status()
+            .map_err(|_| "原版 App 退出命令失败".to_string())?;
+        if !status.success() {
+            return Err("原版 App 退出命令失败".into());
+        }
     }
     #[cfg(windows)]
     {
@@ -607,9 +791,13 @@ fn close_official_if_running(product: Product) -> Result<(), String> {
             "$names={process_names}; Get-Process -Name $names -ErrorAction SilentlyContinue | \
              ForEach-Object {{ $_.CloseMainWindow() | Out-Null }}"
         );
-        let _ = Command::new("powershell.exe")
+        let status = Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .status();
+            .status()
+            .map_err(|_| "原版 App 退出命令失败".to_string())?;
+        if !status.success() {
+            return Err("原版 App 退出命令失败".into());
+        }
     }
     for _ in 0..40 {
         if !official_process_running(product) {
@@ -700,11 +888,11 @@ fn restore_official_mode(app: AppHandle) -> Result<bool, String> {
     let restored = match product {
         Product::Claude => {
             let paths = claude::default_paths()?;
-            claude::restore(&paths)
+            claude::restore(&paths, || ensure_official_app_stopped(Product::Claude))
         }
         Product::Codex => restore_codex(&app),
     }?;
-    if restored && official_app_installed(product) {
+    if restored {
         launch_official(product)?;
     }
     if restored && product == Product::Codex {
@@ -728,7 +916,7 @@ fn open_allowed_link(app: AppHandle, target: String) -> Result<(), String> {
             Product::Codex => "https://chatgpt.com/download/",
         },
         "free-token" => "https://github.com/ruodou233/free-token-eggs",
-        "invite" => "https://github.com/ruodou233/friend-agent-launcher/releases",
+        "invite" => "https://github.com/ruodou233/friend-agent-launcher",
         "our-gateway" => "https://github.com/ruodou233/friend-agent-launcher#获取-key",
         _ => return Err("不允许打开这个地址".into()),
     };

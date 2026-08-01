@@ -1,138 +1,66 @@
 # Friend Agent Launcher
 
-给不熟悉 Provider、配置文件和 CC Switch 的朋友使用的两个轻量桌面启动器：
+这是一个非官方 companion/launcher 的源码基础，用来验证“保留官方桌面 App，只写入受信 Friend 配置”的本地流程。它不包含、修改、注入、重签或重新分发 Claude Desktop、ChatGPT 或 Codex 官方 App，也不等于可以发给朋友的安装包。
 
-- **Friend Claude**：配置并打开原版 Claude Desktop。
-- **Friend Codex**：配置并打开原版 ChatGPT / Codex 桌面端。
+作者：ruodou233、shing19。
 
-用户只需要安装、粘贴 Key、点击“开始使用”。Base URL、协议和模型默认由发行包预设，
-需要时才在“高级设置”中出现。
+## 当前状态
 
-## 为什么不修改官方 App
+- **Claude macOS**：`candidate`，只允许在 macOS 上生成本地 CI/现场验证包；使用前必须已经安装官方 Claude Desktop。当前不宣称“下载即安装”“一键可用”或朋友可直接使用。
+- **Claude Windows**：`blocked`。
+- **Codex macOS / Windows**：`blocked`，仅保留脱敏 research；不构建、不打包、不发布 Codex artifact。
+- **Friend gateway**：仓内已有可运行的 dependency-free `reference/mock`，覆盖合同中的四条 Friend 路径；本地测试不需要真实凭据。`proxy` 只表示显式 adapter 边界，不代表真实上游已接通。
+- **真实外部链路**：VPS、公网 HTTPS/TLS、真实 New API catalog/balance adapter、朋友设备可达性、P0 和签名分发均未验证；`new-api-deployment/` 是未部署模板。
+- `contracts/friend-api.openapi.json` 和 `release-support.json` 是无密钥机器契约/门禁数据，不代表服务已经上线。
 
-Claude Desktop 已提供官方第三方推理模式，保留 Chat、Cowork 和 Code 原版界面；
-Codex 桌面端也支持用户级自定义 Responses Provider。因此本项目不复制界面、不修改、
-注入、重签或重新分发官方二进制。官方 App 继续走自己的自动更新。
+公开仓库不包含 Friend Key、上游 Key、账号密码、真实域名或官方 App 二进制。没有真实固定网关时，客户端运行时失败关闭；候选包也不构成可用发行版。
 
-参考：
+## 当前客户端边界
 
-- [Claude Desktop on 3P](https://claude.com/docs/third-party/claude-desktop/overview)
-- [Claude Desktop Gateway](https://claude.com/docs/third-party/claude-desktop/gateway)
-- [Codex custom model providers](https://developers.openai.com/codex/config-advanced/#custom-model-providers)
-- [CC Switch](https://github.com/farion1231/cc-switch)
-- [relay-ai](https://github.com/jacob-bd/relay-ai)
-- [codex-relay](https://github.com/MetaFARS/codex-relay)
+当前 Friend Claude 流程只接受一次性 Friend Key，从 Rust 后端获取固定目录并选择 `canonical_id`；前端不提供 Endpoint、Provider 或裸模型输入，也不接受客户端覆盖账户归属。目录信任只基于固定 HTTPS origin、严格 wire schema、`tls-fixed-gateway`、版本和过期时间，不是公钥签名实现。
 
-## 最终使用流程
+配置后的请求仍由官方 Claude Desktop 发出；本工具只负责本地候选流程、固定网关配置、恢复入口和状态展示。余额是 New API 的整数最小货币单位读数，不在控制面建立第二本账。
 
-1. 用户下载 Friend Claude 或 Friend Codex。
-2. 启动器检测官方 App；未安装时只显示一个“下载官方 App”按钮。
-3. 首次使用只粘贴 Key；发行包预设 HTTPS 网关和默认模型。
-4. 启动器完成一次对应协议的低成本模型调用；高级设置中可获取去重后的模型列表。
-5. 启动器备份现有配置、写入配置、必要时正常重启并打开原版 App。
-6. 以后用户点击 Friend Claude / Friend Codex 图标即可直接进入原版 Agent。
-7. 恢复官方模式时会自动重新打开原版 App；卸载启动器前应先点一次“恢复官方模式”。
+配置成功后，Key 按 Claude 官方 3P 静态配置写入当前 Friend profile，本机账户可读取；对本工具的持久化写入而言，Key 只存在这个最终 Friend profile。敏感 profile 使用最终 generation path 的 `create_new`、Unix `0600`、flush 和 sync，不生成本工具的 `.friend-agent.tmp` / `.friend-agent.bak` 明文副本；输入框提交后清空，本工具设置、日志和恢复 manifest 不另存或回显。
 
-“没有 Key？”只提供三个可选入口：免费 Token、邀请朋友奖励、我们的中转站。它不阻塞
-已有 Key 的用户。
+Claude 的 configure/current-key/restore 文件事务同时持有进程 Mutex 和专用非敏感 `.friend-agent.lock`；后者只协调同样配合该锁的进程，不是不可伪造的强 CAS，也不能消灭不使用该锁的外部写入竞态。后端在首次快照前确认官方 App 已停止，并在写入/删除最终动作前再次校验；发现异常就 fail-closed 进入 `RECOVERY_REQUIRED`。恢复 journal 会在 library 与 `friend-generations` 两处分别写入、读回验证并 sync，只有两处都持久化才算成功，任一处失败都不静默回退。
 
-## 获取 Key
+首页保留三类入口：
 
-- **免费 Token**：打开 [free-token-eggs](https://github.com/ruodou233/free-token-eggs)，查看当前仍值得注册的平台。
-- **邀请朋友**：转发本项目的 [Releases](https://github.com/ruodou233/friend-agent-launcher/releases) 下载页；奖励登记暂由发行者人工处理。
-- **我们的中转站**：朋友内测阶段由发行者逐人创建、限额和发放 Key；公网网关上线前不开放自助购买。
+1. **我方 Key**：V1A 唯一可直接配置和查余额的入口，按账户、产品和安装绑定控制额度。
+2. **邀请**：只打开人工登记入口，不承诺自动到账或自动结算。
+3. **免费第三方**：只打开外链，不接受第三方 Key、Endpoint 或 Provider。
 
-## 实现范围
+“打开官方获取页”只是外链入口，不是安装器；官方 App 需要用户自行安装并在启动器中复检。
 
-两个产品共用一个 Tauri 2 核心，只保留以下能力：
+## 构建、测试与门禁
 
-- 官方 App 检测、下载入口和启动；
-- Key、网关和模型的首次配置；
-- Claude Messages / Codex Responses 最小调用与可选模型发现；
-- 原配置备份、一键恢复官方模式；
-- 错误 Key、协议不兼容和网关不可达的中文提示；
-- Windows x64、macOS Apple Silicon 构建；
-- 源码与产物的凭据扫描；
-
-首版不做支付、复杂多 Provider 面板、动态路由、独立聊天历史或自制 Agent 界面。
-同名模型的多上游迁移由服务端完成，客户端不让用户理解线路概念。
-
-## Claude 与 Codex 的差异
-
-### Friend Claude
-
-写入 Claude Desktop 官方 3P Gateway 配置：
-
-- 网关必须支持 Anthropic Messages `POST /v1/messages`；
-- 可通过 `GET /v1/models` 自动发现 Claude 模型，也可写显式模型列表；
-- 会话保存在用户本机；
-- 完整退出并重启 Claude 后配置生效。
-
-Claude 的单机静态 Gateway Key 会进入 Claude 的本地 3P 配置。朋友内测版因此只使用每人、
-每个 Agent 独立的低额度下游 Key，并确保可定位、限额和单独吊销。正式扩大分发时再升级为
-OIDC 或受管 Credential Helper。
-
-### Friend Codex
-
-保留式修改 `~/.codex/config.toml`：
-
-- 网关必须支持 OpenAI Responses API；
-- Key 不写进 TOML；通过安装在稳定 App Data 路径的凭据 Helper 从系统凭据库按需读取；
-- macOS 使用 Keychain，Windows 使用 Credential Manager；
-- 原有项目、对话、MCP 和其他配置不删除。
-
-如果某个上游只有 Chat Completions，才另行评估协议转换；我们的 New API 已提供
-Responses，首版不附带 relay。
-
-## 构建
-
-源码构建不含任何 Key。发行者通过非敏感环境变量预设网关与默认模型：
+Node.js 22.x 是门禁基线；依赖版本由 `package-lock.json` 锁定。以下命令是当前真实的静态构建、测试和门禁入口：
 
 ```bash
-export FRIEND_GATEWAY_URL=https://gateway.example.com
-export FRIEND_CLAUDE_MODEL=your-claude-logical-model
-export FRIEND_CODEX_MODEL=your-codex-logical-model
-npm ci
-npm test
-npm run desktop:build:claude
-npm run desktop:build:codex
-# Windows 上也可以一次生成两个安装器：
-npm run desktop:build:windows
+python friend-gateway/tests/test_gateway.py
+python contracts/validate_contract.py
+bash payment-control-plane/verify.sh
+python tests/test_deployment_static.py
+python scripts/verify-release-support.py --action check
+python tests/test_release_gate.py
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --release --manifest-path src-tauri/Cargo.toml
+npm run build:claude
+npm run build:codex
+git diff --check
+bash scripts/scan-secrets.sh
 ```
 
-没有预设时仍可在“高级设置”手动填写，适合开发调试；发给小白的发行包必须预设公网
-HTTPS 网关和默认逻辑模型。
+`npm run desktop:build:claude` 还要通过 `release-support.json` 的 Claude macOS `candidate` 门禁，只能生成本地 candidate；`npm run desktop:build:codex` 和 `npm run desktop:build:windows` 应保持阻断。手工执行 Codex Tauri 构建同样会先经过门禁，且 Codex 配置的 `bundle.active` 为 `false`。
 
-## 发布阶段
+构建流程由 `scripts/build-macos.sh` 统一编排；其中 wrapper 环境变量检查只用于阻止误用，不是安全边界，也不能证明构建不可由其他方式触发。真正的发布依据是 CI、支持矩阵、最终产物 allowlist、secret scan 和 P0 evidence。这不产生朋友可直接安装的发行包。
 
-### 朋友内测版
+如果本机不是 Node.js 22.x，仍可运行契约校验、静态前端构建、Rust 格式检查和测试，但结果必须记录 Node 版本偏差；不因版本偏差宣称候选包可发布，也不安装系统软件来规避门禁。
 
-- 未签名或临时签名安装包；
-- 每人独立、低额度、可吊销 Key；
-- 在真实 Windows 和 macOS 上完成安装、首次对话、重启、换 Key、恢复配置和卸载测试；
-- 卸载前先在启动器中恢复官方模式，避免遗留本项目的 Provider 配置；
-- 网关不可用或协议不匹配时失败关闭，不写坏原配置。
+## 不修改官方 App
 
-### 公开正式版
+Friend 的边界是辅助配置和启动，不复制官方 UI，不接管官方更新，不把官方 App 放进本仓库。当前公开状态仅支持已安装官方 App 后的 Claude macOS 本地候选验证；Windows、Codex、朋友分发、VPS 上线和公开 Release 都等待各自门禁与真实 P0 证据。
 
-- Apple Developer ID 签名与公证；
-- Windows 代码签名；
-- 国内可访问的公网 HTTPS 网关；
-- 发布前扫描源码、Git 历史和全部安装产物，确认没有 API Key、密码或个人测试数据。
-
-## 当前阻断项
-
-Mac mini 上的 New API 目前只监听回环地址，尚无朋友设备可长期访问的公网 HTTPS 域名。
-因此当前可以开源源码、生成无密钥 Beta 安装器并做本机兼容测试；但“安装后只粘贴 Key
-就能从朋友家使用”的正式验收，必须等公网 HTTPS 入口完成并注入发行构建。Codex 桌面端
-在完全没有 OpenAI 登录状态时是否接受第三方 Provider，也仍需在干净 Windows/macOS
-账户中做端到端实测。
-
-## 开源边界
-
-- 仓库和 Release 不包含上游 Key、下游 Key、账号密码或官方 App 二进制。
-- 项目不使用 CC Switch 名称，不冒充 Claude、Anthropic、Codex 或 OpenAI 官方产品。
-- Claude 单机配置目前通过其本地 `configLibrary` 兼容实现写入；官方推荐路径仍是 App
-  内“Apply locally”，因此每次 Claude 大版本更新都要回归测试并保留一键恢复。
-- 借鉴 MIT 项目的配置与启动思路；若直接复制代码，会保留相应许可证和版权声明。
-- 项目采用 MIT 许可证；发布前仍需对新增依赖执行第三方许可证核对。
+项目采用 MIT 许可证；新增依赖和未来发布产物仍需单独做许可证与凭据扫描。

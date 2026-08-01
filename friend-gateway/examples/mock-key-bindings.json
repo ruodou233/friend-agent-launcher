@@ -1,0 +1,9 @@
+[
+  {
+    "key_sha256": "17846a1c6d51ac5117fdc77aa7dd45cfeed961e0bfa39f73019dba5f6b41524d",
+    "account_id": "acct-mock",
+    "install_id": "install-mock",
+    "status": "active",
+    "expires_at": "2099-01-01T00:00:00Z"
+  }
+]

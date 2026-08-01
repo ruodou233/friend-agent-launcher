@@ -21,19 +21,19 @@
 	}
 
 	handle @friend_preflight {
-		reverse_proxy new-api:{$NEW_API_PORT}
+		reverse_proxy friend-gateway:{$FRIEND_GATEWAY_PORT}
 	}
 	handle @friend_catalog {
-		reverse_proxy new-api:{$NEW_API_PORT}
+		reverse_proxy friend-gateway:{$FRIEND_GATEWAY_PORT}
 	}
 	handle @friend_balance {
-		reverse_proxy new-api:{$NEW_API_PORT}
+		reverse_proxy friend-gateway:{$FRIEND_GATEWAY_PORT}
 	}
 	handle @friend_messages {
-		reverse_proxy new-api:{$NEW_API_PORT}
+		reverse_proxy friend-gateway:{$FRIEND_GATEWAY_PORT}
 	}
 
-	# No catch-all proxy: management, database, models, responses, and unknown paths are closed.
+	# No catch-all proxy: management, database, models, responses, health, and unknown paths are closed.
 	handle {
 		respond "not found" 404
 	}

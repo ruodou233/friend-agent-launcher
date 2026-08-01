@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 CONTRACT = ROOT / "friend-api.openapi.json"
+GATEWAY_SOURCE = ROOT.parent / "src-tauri" / "src" / "gateway.rs"
 
 
 def fail(message):
@@ -89,13 +90,50 @@ def main():
     catalog_required = {
         "product", "protocol", "canonical_id", "model_ref", "gateway_ref",
         "display_name", "capabilities", "default", "catalog_version",
-        "expires_at", "billing_label", "signature",
+        "expires_at", "billing_label",
     }
     catalog = schemas["CatalogEntry"]
     fail_if(set(catalog["required"]) != catalog_required, "catalog schema required fields drifted")
     fail_if(catalog.get("additionalProperties") is not False, "catalog entries must reject extra fields")
     fail_if(catalog["properties"]["gateway_ref"].get("const") != "friend-fixed-gateway", "gateway must be fixed")
-    fail_if("signature" not in catalog["properties"], "catalog signature is required")
+    fail_if("signature" in catalog["properties"], "catalog entries must not claim cryptographic trust")
+
+    expected_wire = {
+        "CatalogRequest": {"product", "protocol"},
+        "CatalogResponse": {"product", "protocol", "catalog_version", "expires_at", "integrity", "catalog", "balance"},
+        "CatalogEntry": catalog_required,
+        "BalanceResponse": {"product", "balance"},
+        "BalanceSnapshot": {"amount_minor", "currency", "as_of", "source"},
+    }
+    for schema_name, expected_fields in expected_wire.items():
+        schema = schemas[schema_name]
+        fail_if(set(schema.get("required", [])) != expected_fields, "{} wire required fields drifted".format(schema_name))
+        fail_if(set(schema.get("properties", {})) != expected_fields, "{} wire properties drifted".format(schema_name))
+        fail_if(schema.get("additionalProperties") is not False, "{} wire schema must reject extra fields".format(schema_name))
+
+    catalog_request = schemas["CatalogRequest"]
+    fail_if("account_id" in catalog_request["properties"], "catalog request accepts account_id")
+    fail_if("install_id" in catalog_request["properties"], "catalog request accepts install_id")
+    fail_if(catalog_request["required"] != ["product", "protocol"], "catalog request fields must match Rust serialization")
+
+    catalog_response = schemas["CatalogResponse"]
+    fail_if(
+        catalog_response["properties"]["integrity"].get("const") != "tls-fixed-gateway",
+        "catalog trust marker must be tls-fixed-gateway",
+    )
+    balance_snapshot = schemas["BalanceSnapshot"]
+    fail_if(balance_snapshot["properties"]["amount_minor"].get("type") != "integer", "balance must use integer minor units")
+    fail_if(balance_snapshot["properties"]["amount_minor"].get("minimum") != 0, "balance minor units must be non-negative")
+    fail_if(balance_snapshot["properties"]["source"].get("const") != "new-api", "balance source must remain New API")
+    fail_if(
+        schemas["CatalogVersion"]["pattern"] != r"^v1a-[A-Za-z0-9][A-Za-z0-9._:-]{0,59}$",
+        "catalog version must match the V1A Rust prefix check",
+    )
+    fail_if(catalog["properties"]["capabilities"].get("minItems") != 1, "catalog capabilities cannot be empty")
+    fail_if(
+        catalog["properties"]["capabilities"].get("contains") != {"const": "streaming"},
+        "catalog capabilities must include streaming",
+    )
 
     public_request_schemas = ["CatalogRequest", "MessagesRequest"]
     for schema_name in public_request_schemas:
@@ -103,6 +141,7 @@ def main():
         fail_if(schema.get("additionalProperties") is not False, "public request {} must be closed".format(schema_name))
         fail_if("account_id" in schema.get("properties", {}), "public request {} accepts account_id".format(schema_name))
         property_names = set(schema.get("properties", {}))
+        fail_if("install_id" in property_names, "public request {} accepts install_id".format(schema_name))
         fail_if(bool(property_names.intersection({"endpoint", "provider"})), "public request {} exposes endpoint/provider".format(schema_name))
 
     error_codes = set(schemas["ErrorCode"]["enum"])
@@ -119,8 +158,19 @@ def main():
     fail_if(schemas["ManualRechargeCreateRequest"]["properties"].get("business_ref") is not None, "business_ref must be server-derived")
     fail_if("manual-wechat:" not in json.dumps(schemas["ManualRechargeResponse"]), "business_ref derivation is not documented")
 
+    gateway_source = GATEWAY_SOURCE.read_text(encoding="utf-8")
+    for marker in (
+        "pub(crate) amount_minor: u64",
+        "pub(crate) as_of: String",
+        "pub(crate) source: String",
+        "pub(crate) const CATALOG_TRUST_BOUNDARY: &str = \"tls-fixed-gateway\"",
+    ):
+        fail_if(marker not in gateway_source, "Rust client wire field missing: {}".format(marker))
+    fail_if("pub(crate) amount: String" in gateway_source, "Rust client must not deserialize decimal amount strings")
+
     # A cheap source-level secret guard for this public contract.
     raw = CONTRACT.read_text(encoding="utf-8")
+    fail_if("signature" in raw.lower(), "contract must not contain signature trust claims")
     fail_if(bool(re.search(r"(?i)(sk-[A-Za-z0-9]{12,}|bearer\s+[A-Za-z0-9_-]{20,})", raw)), "possible credential found in contract")
     print("contract validation: ok ({})".format(CONTRACT))
 

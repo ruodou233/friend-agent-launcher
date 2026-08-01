@@ -4,8 +4,13 @@ import "./styles.css";
 const variant = __BUILD_VARIANT__;
 const isClaude = variant === "claude";
 const buildGatewayConfigured = __BUILD_GATEWAY_CONFIGURED__;
-const productName = isClaude ? "Friend Claude" : "Friend Codex（暂不开放）";
+const productName = isClaude ? "Friend Claude" : "Friend Codex（研究/阻断）";
 const officialName = isClaude ? "Claude Desktop" : "ChatGPT / Codex";
+const gatewayNote = isClaude
+  ? buildGatewayConfigured
+    ? "Claude macOS 本地 candidate 已带固定网关配置；这不代表一键可用或可发给朋友。"
+    : "当前构建未带固定网关配置；Claude macOS candidate 会失败关闭。"
+  : "Codex 当前仅作研究，V1A blocked；不生成或发布 Codex 包。";
 
 document.title = productName;
 
@@ -43,7 +48,7 @@ root.innerHTML = `
           <label class="key-field">
             <span>一次性输入 Friend Key</span>
             <input id="secret" type="password" autocomplete="new-password" placeholder="粘贴后验证目录" />
-            <small>提交后立即清空；不会回显、落盘或进入日志。</small>
+            <small>提交后立即清空输入框。配置成功后 Key 会写入当前 Friend profile（本机账户可读取）；本工具设置、日志和恢复 manifest 不另存或回显。</small>
           </label>
         </fieldset>
 
@@ -77,7 +82,7 @@ root.innerHTML = `
             <b>我方 Key</b><small>手工输入，按账户与安装控制额度</small>
           </button>
           <button class="entry-card" data-link="invite" type="button">
-            <b>邀请</b><small>人工登记状态，暂不承诺自动到账</small>
+            <b>邀请说明</b><small>查看邀请说明；当前没有自动登记系统</small>
           </button>
           <button class="entry-card" data-link="free-token" type="button">
             <b>免费第三方</b><small>只打开外链，不接受第三方 Key 或 Endpoint</small>
@@ -86,13 +91,13 @@ root.innerHTML = `
       </section>
 
       <nav class="secondary">
-        <button id="download" type="button">下载原版 App</button>
+        <button id="download" type="button">打开官方获取页</button>
         <button id="restore" type="button">恢复官方模式</button>
       </nav>
 
       <footer>
-        <p id="gateway-note">${buildGatewayConfigured ? "发行构建已带固定网关配置。" : "当前构建未带远端网关配置；发行模式会失败关闭。"}</p>
-        <p>安装后，日常只需点击 ${productName}；本工具不包含、不修改也不冒充官方 App。</p>
+        <p id="gateway-note">${gatewayNote}</p>
+        <p>本工具只打开官方 App 或官方获取页；不包含、不修改也不冒充官方 App。</p>
       </footer>
     </section>
   </main>
@@ -137,11 +142,16 @@ function setConsentState() {
 }
 
 function renderBalance(balance) {
-  if (!balance || typeof balance.amount !== "string") {
+  if (
+    !balance
+    || !Number.isSafeInteger(balance.amount_minor)
+    || balance.amount_minor < 0
+    || typeof balance.currency !== "string"
+  ) {
     balanceValue.textContent = "未读取";
     return;
   }
-  balanceValue.textContent = `${balance.amount} ${balance.currency || ""}`.trim();
+  balanceValue.textContent = `${balance.amount_minor} ${balance.currency}（最小货币单位）`;
 }
 
 function renderCatalog(data) {
@@ -175,9 +185,17 @@ async function bootstrap() {
     const data = await invoke("launcher_status");
     officialAppRunning = Boolean(data.official_app_running);
     status.classList.toggle("ready", Boolean(data.official_app_installed));
-    status.innerHTML = data.official_app_installed
-      ? `<span class="dot"></span><div><strong>原版 ${officialName} 已安装</strong><small>${data.official_app_version || "可以开始使用"}</small></div>`
-      : `<span class="dot"></span><div><strong>尚未安装原版 ${officialName}</strong><small>先点“下载原版 App”，安装后再回来</small></div>`;
+    const statusTitle = data.official_app_installed
+      ? `原版 ${officialName} 已通过身份校验`
+      : data.official_app_error
+        ? `原版 ${officialName} 身份校验未通过`
+        : `尚未安装原版 ${officialName}`;
+    const statusDetail = data.official_app_installed
+      ? data.official_app_version || "可以开始使用"
+      : data.official_app_error || "先打开官方获取页并完成安装，再回来";
+    status.innerHTML = `<span class="dot"></span><div><strong></strong><small></small></div>`;
+    status.querySelector("strong").textContent = statusTitle;
+    status.querySelector("small").textContent = statusDetail;
     if (!data.gateway_configured && isClaude) {
       showMessage("当前发行构建没有固定网关配置，已失败关闭。请使用正确的现场测试构建。", "error");
     }
