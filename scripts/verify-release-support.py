@@ -30,10 +30,13 @@ WRAPPER_VALUE = "scripts/build-macos.sh"
 CANDIDATE_DMG_NAME = "Friend Claude_0.1.0_aarch64.dmg"
 RELEASE_CANDIDATE_DMG_NAME = "Friend-Claude-0.1.0-macos-arm64-candidate.dmg"
 RELEASE_CHECKSUM_NAME = "SHA256SUMS-candidate.txt"
-EXPECTED_CLAUDE_APP = Path("macos") / "Friend Claude.app"
-# Tauri may remove the macOS .app staging tree after it creates the DMG. Keep
-# both names as the complete root allowlist, while requiring dmg/ below.
-CANDIDATE_ROOT_ENTRIES = frozenset({"dmg", "macos"})
+# Tauri may remove the macOS .app staging tree after it creates the DMG, while
+# create-dmg keeps its support templates beside the final artifact.
+CANDIDATE_ROOT_ENTRIES = frozenset({"dmg", "macos", "share"})
+CANDIDATE_REQUIRED_ROOT_ENTRIES = frozenset({"dmg", "share"})
+CANDIDATE_DMG_HELPER_NAMES = frozenset({"bundle_dmg.sh", "icon.icns"})
+CANDIDATE_DMG_REQUIRED_HELPER_NAMES = frozenset({"bundle_dmg.sh"})
+EXPECTED_SHARE_FILES = frozenset({"template.applescript", "eula-resources-template.xml"})
 
 
 class ReleaseGateError(Exception):
@@ -202,38 +205,78 @@ def _is_real_directory(path: Path) -> bool:
     return stat.S_ISDIR(info.st_mode)
 
 
+def _validate_candidate_share(tree: Iterable[Path], share_dir: Path) -> None:
+    create_dmg_dir = share_dir / "create-dmg"
+    support_dir = create_dmg_dir / "support"
+
+    share_entries = [path for path in tree if path.parent == share_dir]
+    if len(share_entries) != 1 or share_entries[0].name != "create-dmg":
+        raise ReleaseGateError("candidate share/ must contain only create-dmg/")
+    if not _is_real_directory(share_entries[0]):
+        raise ReleaseGateError("candidate share/create-dmg must be a directory")
+
+    create_dmg_entries = [path for path in tree if path.parent == create_dmg_dir]
+    if len(create_dmg_entries) != 1 or create_dmg_entries[0].name != "support":
+        raise ReleaseGateError("candidate share/create-dmg/ must contain only support/")
+    if not _is_real_directory(create_dmg_entries[0]):
+        raise ReleaseGateError("candidate share/create-dmg/support must be a directory")
+
+    support_entries = [path for path in tree if path.parent == support_dir]
+    if {path.name for path in support_entries} != EXPECTED_SHARE_FILES:
+        raise ReleaseGateError("candidate share support must contain only the two expected templates")
+    if any(not _is_real_file(path) for path in support_entries):
+        raise ReleaseGateError("candidate share support entries must be regular files")
+
+
 def validate_candidate_bundle(bundle_dir: Path) -> Path:
     """Validate a fresh Tauri bundle and return the only DMG to copy.
 
     Tauri may remove the macOS app staging tree after creating the DMG, so
-    macos/ is optional while the DMG allowlist remains mandatory.
+    macos/ is optional and must be empty while the DMG and create-dmg support
+    files remain mandatory.
     """
 
     tree = list(_walk_without_symlinks(bundle_dir, "candidate bundle"))
 
     root_entries = [path for path in tree if path.parent == bundle_dir]
     root_entry_names = {path.name for path in root_entries}
-    if "dmg" not in root_entry_names or not root_entry_names <= CANDIDATE_ROOT_ENTRIES:
-        raise ReleaseGateError("candidate bundle root must contain dmg/ and optional macos/")
+    if (
+        not CANDIDATE_REQUIRED_ROOT_ENTRIES <= root_entry_names
+        or not root_entry_names <= CANDIDATE_ROOT_ENTRIES
+    ):
+        raise ReleaseGateError(
+            "candidate bundle root must contain dmg/ and share/ and only optional macos/"
+        )
     if any(not _is_real_directory(path) for path in root_entries):
         raise ReleaseGateError("candidate bundle root entries must be directories")
 
     dmg_dir = bundle_dir / "dmg"
     macos_dir = bundle_dir / "macos"
+    share_dir = bundle_dir / "share"
     dmg_entries = [path for path in tree if path.parent == dmg_dir]
-    if len(dmg_entries) != 1 or dmg_entries[0].name != CANDIDATE_DMG_NAME:
-        raise ReleaseGateError("candidate dmg/ must contain only the expected Claude DMG")
-    if not _is_real_file(dmg_entries[0]):
-        raise ReleaseGateError("expected Claude DMG must be a regular file")
+    dmg_entry_names = {path.name for path in dmg_entries}
+    required_dmg_names = {CANDIDATE_DMG_NAME} | CANDIDATE_DMG_REQUIRED_HELPER_NAMES
+    if (
+        not required_dmg_names <= dmg_entry_names
+        or not dmg_entry_names <= {CANDIDATE_DMG_NAME} | CANDIDATE_DMG_HELPER_NAMES
+    ):
+        raise ReleaseGateError(
+            "candidate dmg/ must contain the final DMG, bundle_dmg.sh, and only optional icon.icns"
+        )
+    if any(not _is_real_file(path) for path in dmg_entries):
+        raise ReleaseGateError("candidate dmg/ entries must be regular files")
+
+    _validate_candidate_share(tree, share_dir)
 
     if macos_dir in root_entries:
         macos_entries = [path for path in tree if path.parent == macos_dir]
-        if len(macos_entries) != 1 or macos_entries[0].name != EXPECTED_CLAUDE_APP.name:
-            raise ReleaseGateError("candidate macos/ must contain only Friend Claude.app")
-        if not _is_real_directory(macos_entries[0]):
-            raise ReleaseGateError("Friend Claude.app must be a directory")
+        if macos_entries:
+            raise ReleaseGateError("candidate macos/ must be empty")
 
-    return dmg_entries[0]
+    final_dmg = dmg_dir / CANDIDATE_DMG_NAME
+    if not _is_real_file(final_dmg):
+        raise ReleaseGateError("candidate final DMG must remain a regular file")
+    return final_dmg
 
 
 def validate_release_directory(release_dir: Path, require_outputs: bool = False) -> None:

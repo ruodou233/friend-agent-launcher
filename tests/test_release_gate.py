@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import hashlib
 import importlib.util
+import ntpath
 import os
 import shutil
 import subprocess
@@ -50,6 +51,11 @@ def run_verify(
 def git_bash_path(path: Path) -> str:
     """Pass a path to Git Bash without Windows backslashes."""
 
+    path_text = str(path)
+    drive, tail = ntpath.splitdrive(path_text)
+    if len(drive) == 2 and drive[1] == ":" and ntpath.isabs(tail):
+        normalized_tail = tail.replace("\\", "/")
+        return f"/{drive[0].lower()}{normalized_tail}"
     return path.as_posix()
 
 
@@ -64,11 +70,43 @@ def write_file(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def create_tauri_success_bundle(bundle: Path, verifier, *, include_macos: bool = True) -> Path:
+    expected_dmg = bundle / "dmg" / verifier.CANDIDATE_DMG_NAME
+    write_file(expected_dmg, "claude dmg fixture")
+    write_file(bundle / "dmg" / "bundle_dmg.sh", "#!/bin/sh\n")
+    write_file(bundle / "dmg" / "icon.icns", "icon fixture")
+    write_file(
+        bundle / "share" / "create-dmg" / "support" / "template.applescript",
+        "template fixture",
+    )
+    write_file(
+        bundle / "share" / "create-dmg" / "support" / "eula-resources-template.xml",
+        "eula fixture",
+    )
+    if include_macos:
+        (bundle / "macos").mkdir(parents=True)
+    return expected_dmg
+
+
 def create_symlink(link: Path, target: Path, *, target_is_directory: bool) -> None:
     try:
         link.symlink_to(target, target_is_directory=target_is_directory)
     except (NotImplementedError, OSError) as error:
         raise unittest.SkipTest(f"symlinks are unavailable: {error}") from error
+
+
+def create_fifo(path: Path) -> None:
+    try:
+        os.mkfifo(path)
+    except (AttributeError, NotImplementedError, OSError) as error:
+        raise unittest.SkipTest(f"FIFOs are unavailable: {error}") from error
+
+
+def remove_tree_entry(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
 
 
 def load_verify_module():
@@ -81,6 +119,16 @@ def load_verify_module():
 
 
 class ReleaseSupportTests(unittest.TestCase):
+    def test_git_bash_path_converts_windows_drive_absolute_path(self) -> None:
+        self.assertEqual(
+            git_bash_path(Path(r"D:\a\friend-agent-launcher\scripts\scan-secrets.sh")),
+            "/d/a/friend-agent-launcher/scripts/scan-secrets.sh",
+        )
+
+    def test_git_bash_path_preserves_posix_path(self) -> None:
+        path = Path("/a/friend-agent-launcher/scripts/scan-secrets.sh")
+        self.assertEqual(git_bash_path(path), path.as_posix())
+
     def test_current_matrix_is_candidate_only_and_upload_is_blocked(self) -> None:
         self.assertEqual(run_verify("--action", "check").returncode, 0)
         self.assertEqual(
@@ -132,10 +180,7 @@ class ReleaseSupportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             temporary_root = Path(temporary)
             fresh_bundle = temporary_root / "fresh-target" / "release" / "bundle"
-            expected_dmg = fresh_bundle / "dmg" / verifier.CANDIDATE_DMG_NAME
-            expected_app = fresh_bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Info.plist"
-            write_file(expected_dmg, "claude dmg fixture")
-            write_file(expected_app, "claude app fixture")
+            expected_dmg = create_tauri_success_bundle(fresh_bundle, verifier)
 
             stale_codex = (
                 temporary_root
@@ -158,172 +203,209 @@ class ReleaseSupportTests(unittest.TestCase):
         self.assertNotIn("src-tauri/target/release/bundle", macos_script)
         self.assertNotIn("rm -rf", macos_script)
 
-    def test_candidate_bundle_allows_tauri_cleaned_macos_staging(self) -> None:
+    def test_candidate_bundle_accepts_missing_or_empty_macos_staging(self) -> None:
+        verifier = load_verify_module()
+
+        for include_macos in (False, True):
+            with self.subTest(include_macos=include_macos), tempfile.TemporaryDirectory() as temporary:
+                bundle = Path(temporary) / "target" / "release" / "bundle"
+                expected_dmg = create_tauri_success_bundle(
+                    bundle, verifier, include_macos=include_macos
+                )
+
+                self.assertEqual(verifier.validate_candidate_bundle(bundle), expected_dmg)
+                if include_macos:
+                    self.assertEqual(list((bundle / "macos").iterdir()), [])
+                else:
+                    self.assertFalse((bundle / "macos").exists())
+
+    def test_candidate_bundle_allows_icon_to_be_absent(self) -> None:
         verifier = load_verify_module()
 
         with tempfile.TemporaryDirectory() as temporary:
             bundle = Path(temporary) / "target" / "release" / "bundle"
-            expected_dmg = bundle / "dmg" / verifier.CANDIDATE_DMG_NAME
-            write_file(expected_dmg, "claude dmg fixture")
+            expected_dmg = create_tauri_success_bundle(bundle, verifier)
+            (bundle / "dmg" / "icon.icns").unlink()
 
-            self.assertFalse((bundle / "macos").exists())
             self.assertEqual(verifier.validate_candidate_bundle(bundle), expected_dmg)
 
-            write_file(bundle / "release-notes.txt", "unexpected root entry")
-            with self.assertRaises(verifier.ReleaseGateError):
-                verifier.validate_candidate_bundle(bundle)
+    def test_candidate_bundle_rejects_missing_and_extra_layout_entries(self) -> None:
+        verifier = load_verify_module()
 
-    def test_candidate_bundle_rejects_empty_macos_staging(self) -> None:
+        cases = (
+            "missing-share",
+            "missing-create-dmg",
+            "missing-support",
+            "missing-final-dmg",
+            "missing-bundle-dmg",
+            "missing-applescript",
+            "missing-eula-template",
+            "extra-root",
+            "extra-root-directory",
+            "extra-dmg-file",
+            "extra-dmg-directory",
+            "extra-share",
+            "extra-create-dmg",
+            "extra-support",
+            "bundle-dmg-directory",
+            "icon-directory",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                bundle = Path(temporary) / "target" / "release" / "bundle"
+                create_tauri_success_bundle(bundle, verifier)
+                dmg_dir = bundle / "dmg"
+                share_dir = bundle / "share"
+                create_dmg_dir = share_dir / "create-dmg"
+                support_dir = bundle / "share" / "create-dmg" / "support"
+
+                if case == "missing-share":
+                    remove_tree_entry(share_dir)
+                elif case == "missing-create-dmg":
+                    remove_tree_entry(create_dmg_dir)
+                elif case == "missing-support":
+                    remove_tree_entry(support_dir)
+                elif case == "missing-final-dmg":
+                    (dmg_dir / verifier.CANDIDATE_DMG_NAME).unlink()
+                elif case == "missing-bundle-dmg":
+                    (dmg_dir / "bundle_dmg.sh").unlink()
+                elif case == "missing-applescript":
+                    (support_dir / "template.applescript").unlink()
+                elif case == "missing-eula-template":
+                    (support_dir / "eula-resources-template.xml").unlink()
+                elif case == "extra-root":
+                    write_file(bundle / "release-notes.txt", "unexpected fixture")
+                elif case == "extra-root-directory":
+                    (bundle / "release-notes").mkdir()
+                elif case == "extra-dmg-file":
+                    write_file(dmg_dir / "unexpected.txt", "unexpected fixture")
+                elif case == "extra-dmg-directory":
+                    (dmg_dir / "unexpected").mkdir()
+                elif case == "extra-share":
+                    write_file(share_dir / "unexpected.txt", "unexpected fixture")
+                elif case == "extra-create-dmg":
+                    write_file(create_dmg_dir / "unexpected.txt", "unexpected fixture")
+                elif case == "extra-support":
+                    write_file(support_dir / "unexpected.txt", "unexpected fixture")
+                elif case == "bundle-dmg-directory":
+                    (dmg_dir / "bundle_dmg.sh").unlink()
+                    (dmg_dir / "bundle_dmg.sh").mkdir()
+                else:
+                    (dmg_dir / "icon.icns").unlink()
+                    (dmg_dir / "icon.icns").mkdir()
+
+                with self.assertRaises(verifier.ReleaseGateError):
+                    verifier.validate_candidate_bundle(bundle)
+
+    def test_candidate_bundle_rejects_macos_content_including_friend_claude_app(self) -> None:
+        verifier = load_verify_module()
+
+        for content in ("Friend Claude.app/Contents/Info.plist", "unexpected.txt"):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as temporary:
+                bundle = Path(temporary) / "target" / "release" / "bundle"
+                create_tauri_success_bundle(bundle, verifier)
+                write_file(bundle / "macos" / content, "unexpected fixture")
+
+                with self.assertRaises(verifier.ReleaseGateError):
+                    verifier.validate_candidate_bundle(bundle)
+
+    def test_candidate_bundle_rejects_final_dmg_directory(self) -> None:
         verifier = load_verify_module()
 
         with tempfile.TemporaryDirectory() as temporary:
             bundle = Path(temporary) / "target" / "release" / "bundle"
-            write_file(bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
-            (bundle / "macos").mkdir(parents=True)
+            expected_dmg = create_tauri_success_bundle(bundle, verifier)
+            expected_dmg.unlink()
+            expected_dmg.mkdir()
 
             with self.assertRaises(verifier.ReleaseGateError):
                 verifier.validate_candidate_bundle(bundle)
 
-    def test_candidate_allowlist_rejects_extra_and_codex_artifacts(self) -> None:
+    def test_candidate_bundle_rejects_final_dmg_symlink(self) -> None:
         verifier = load_verify_module()
-        extra_artifacts = (
-            Path("dmg") / "Friend Claude-extra.dmg",
-            Path("macos") / "Friend Codex.app" / "Contents" / "Info.plist",
-            Path("windows") / "Friend Claude.exe",
-        )
 
-        for extra_artifact in extra_artifacts:
-            with self.subTest(extra_artifact=str(extra_artifact)), tempfile.TemporaryDirectory() as temporary:
-                bundle = Path(temporary) / "target" / "release" / "bundle"
-                write_file(bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
-                write_file(bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Info.plist", "claude app fixture")
-                write_file(bundle / extra_artifact, "unexpected artifact")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "target" / "release" / "bundle"
+            expected_dmg = create_tauri_success_bundle(bundle, verifier)
+            target = root / "outside.dmg"
+            write_file(target, "outside dmg fixture")
+            expected_dmg.unlink()
+            create_symlink(expected_dmg, target, target_is_directory=False)
 
-                with self.assertRaises(verifier.ReleaseGateError):
-                    verifier.validate_candidate_bundle(bundle)
+            with self.assertRaises(verifier.ReleaseGateError):
+                verifier.validate_candidate_bundle(bundle)
 
-    def test_candidate_direct_allowlist_rejects_extra_files_directories_and_siblings(self) -> None:
+    def test_candidate_bundle_rejects_final_dmg_special_file(self) -> None:
         verifier = load_verify_module()
-        extra_entries = (
-            ("root-file", Path("release-notes.txt"), False),
-            ("root-directory", Path("release-notes"), True),
-            ("dmg-file", Path("dmg") / "Other Claude.dmg", False),
-            ("dmg-directory", Path("dmg") / "other", True),
-            ("macos-sibling-app", Path("macos") / "Friend Codex.app" / "Contents" / "Info.plist", False),
-            ("macos-sibling-dmg", Path("macos") / "Other Claude.dmg", False),
-        )
 
-        for case, extra_entry, is_directory in extra_entries:
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
-                bundle = Path(temporary) / "target" / "release" / "bundle"
-                write_file(bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
-                write_file(bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Info.plist", "claude app fixture")
-                if is_directory:
-                    (bundle / extra_entry).mkdir(parents=True, exist_ok=True)
-                else:
-                    write_file(bundle / extra_entry, "unexpected entry")
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "target" / "release" / "bundle"
+            expected_dmg = create_tauri_success_bundle(bundle, verifier)
+            expected_dmg.unlink()
+            create_fifo(expected_dmg)
 
-                with self.assertRaises(verifier.ReleaseGateError):
-                    verifier.validate_candidate_bundle(bundle)
+            with self.assertRaises(verifier.ReleaseGateError):
+                verifier.validate_candidate_bundle(bundle)
+
+    def test_candidate_bundle_rejects_root_and_share_symlinks(self) -> None:
+        verifier = load_verify_module()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real_bundle = root / "real-bundle"
+            create_tauri_success_bundle(real_bundle, verifier)
+            root_link = root / "bundle-link"
+            create_symlink(root_link, real_bundle, target_is_directory=True)
+            with self.assertRaises(verifier.ReleaseGateError):
+                verifier.validate_candidate_bundle(root_link)
+
+            share_paths = (
+                ("share", "share"),
+                ("create-dmg", "share/create-dmg"),
+                ("support", "share/create-dmg/support"),
+            )
+            for case, relative_path in share_paths:
+                with self.subTest(case=case):
+                    bundle = root / case
+                    create_tauri_success_bundle(bundle, verifier)
+                    link = bundle / relative_path
+                    target = root / ("outside-" + case)
+                    target.mkdir()
+                    remove_tree_entry(link)
+                    create_symlink(link, target, target_is_directory=True)
+
+                    with self.assertRaises(verifier.ReleaseGateError):
+                        verifier.validate_candidate_bundle(bundle)
+
+    def test_candidate_bundle_rejects_share_special_file(self) -> None:
+        verifier = load_verify_module()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "target" / "release" / "bundle"
+            create_tauri_success_bundle(bundle, verifier)
+            template = bundle / "share" / "create-dmg" / "support" / "template.applescript"
+            template.unlink()
+            create_fifo(template)
+
+            with self.assertRaises(verifier.ReleaseGateError):
+                verifier.validate_candidate_bundle(bundle)
 
     def test_candidate_root_entries_must_be_directories(self) -> None:
         verifier = load_verify_module()
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            cases = ("dmg", "macos")
+            cases = ("dmg", "macos", "share")
             for wrong_root_entry in cases:
                 with self.subTest(wrong_root_entry=wrong_root_entry):
                     bundle = root / wrong_root_entry
-                    if wrong_root_entry == "dmg":
-                        write_file(bundle / "dmg", "not a directory")
-                        write_file(bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Info.plist", "claude app fixture")
-                    else:
-                        write_file(bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
-                        write_file(bundle / "macos", "not a directory")
+                    create_tauri_success_bundle(bundle, verifier)
+                    remove_tree_entry(bundle / wrong_root_entry)
+                    write_file(bundle / wrong_root_entry, "not a directory")
 
                     with self.assertRaises(verifier.ReleaseGateError):
                         verifier.validate_candidate_bundle(bundle)
-
-    def test_candidate_app_bundle_allows_real_internal_files_and_directories(self) -> None:
-        verifier = load_verify_module()
-
-        with tempfile.TemporaryDirectory() as temporary:
-            bundle = Path(temporary) / "target" / "release" / "bundle"
-            expected_dmg = bundle / "dmg" / verifier.CANDIDATE_DMG_NAME
-            expected_app = bundle / verifier.EXPECTED_CLAUDE_APP
-            write_file(expected_dmg, "claude dmg fixture")
-            write_file(expected_app / "Contents" / "Info.plist", "claude app fixture")
-            write_file(expected_app / "Contents" / "Resources" / "embedded.bin", "embedded fixture")
-            (expected_app / "Contents" / "Frameworks" / "Nested.framework").mkdir(parents=True)
-
-            self.assertEqual(verifier.validate_candidate_bundle(bundle), expected_dmg)
-
-    def test_candidate_allowlist_rejects_root_and_nested_symlinks(self) -> None:
-        verifier = load_verify_module()
-
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-
-            real_bundle = root / "real-bundle"
-            write_file(real_bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
-            write_file(real_bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Info.plist", "claude app fixture")
-            root_link = root / "bundle-link"
-            create_symlink(root_link, real_bundle, target_is_directory=True)
-            with self.assertRaises(verifier.ReleaseGateError):
-                verifier.validate_candidate_bundle(root_link)
-
-            cases = ("expected-dmg", "expected-app", "nested-file", "nested-directory")
-            for case in cases:
-                with self.subTest(case=case):
-                    bundle = root / case
-                    if case == "expected-dmg":
-                        write_file(bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Info.plist", "claude app fixture")
-                        target = root / "outside.dmg"
-                        write_file(target, "outside dmg fixture")
-                        link = bundle / "dmg" / verifier.CANDIDATE_DMG_NAME
-                        link.parent.mkdir(parents=True, exist_ok=True)
-                        create_symlink(link, target, target_is_directory=False)
-                    elif case == "expected-app":
-                        write_file(bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
-                        target = root / "outside.app"
-                        write_file(target / "Contents" / "Info.plist", "outside app fixture")
-                        link = bundle / verifier.EXPECTED_CLAUDE_APP
-                        link.parent.mkdir(parents=True, exist_ok=True)
-                        create_symlink(link, target, target_is_directory=True)
-                    else:
-                        write_file(bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
-                        write_file(bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Info.plist", "claude app fixture")
-                        if case == "nested-file":
-                            target = root / "outside.bin"
-                            write_file(target, "outside file fixture")
-                            link = bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Resources" / "embedded.bin"
-                            link.parent.mkdir(parents=True, exist_ok=True)
-                            create_symlink(link, target, target_is_directory=False)
-                        else:
-                            target = root / "outside-resources"
-                            target.mkdir(parents=True, exist_ok=True)
-                            link = bundle / verifier.EXPECTED_CLAUDE_APP / "Contents" / "Resources"
-                            link.parent.mkdir(parents=True, exist_ok=True)
-                            create_symlink(link, target, target_is_directory=True)
-
-                    with self.assertRaises(verifier.ReleaseGateError):
-                        verifier.validate_candidate_bundle(bundle)
-
-    def test_candidate_allowlist_rejects_unsupported_entries(self) -> None:
-        verifier = load_verify_module()
-
-        with tempfile.TemporaryDirectory() as temporary:
-            bundle = Path(temporary) / "target" / "release" / "bundle"
-            write_file(bundle / "dmg" / verifier.CANDIDATE_DMG_NAME, "claude dmg fixture")
-            unsupported = bundle / "dmg" / "named-pipe"
-            try:
-                os.mkfifo(unsupported)
-            except (AttributeError, NotImplementedError, OSError) as error:
-                raise unittest.SkipTest(f"FIFOs are unavailable: {error}") from error
-
-            with self.assertRaises(verifier.ReleaseGateError):
-                verifier.validate_candidate_bundle(bundle)
 
     def test_release_directory_allowlist_rejects_extra_entries(self) -> None:
         verifier = load_verify_module()
