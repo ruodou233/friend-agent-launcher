@@ -47,9 +47,6 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - name: Run Rust release tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --release
-      - name: Run release gate tests
-        shell: bash
-        run: python tests/test_release_gate.py
       - name: Ensure ripgrep is available for release scans
         shell: bash
         run: |
@@ -81,6 +78,9 @@ jobs:
             exit 1
           }
           rg --version
+      - name: Run release gate tests
+        shell: bash
+        run: python tests/test_release_gate.py
       - name: Scan source, Git history, and artifact paths
         shell: bash
         run: bash scripts/scan-secrets.sh

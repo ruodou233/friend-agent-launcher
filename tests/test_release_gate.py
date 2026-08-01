@@ -423,6 +423,10 @@ class ReleaseSupportTests(unittest.TestCase):
         self.assertIn("brew install ripgrep", workflow)
         self.assertIn("choco install ripgrep", workflow)
         self.assertIn("command -v rg", workflow)
+        self.assertLess(
+            workflow.index("- name: Ensure ripgrep is available for release scans"),
+            workflow.index("- name: Run release gate tests"),
+        )
         self.assertIn("tests/test_deployment_static.py", workflow)
         self.assertIn("cargo fmt", workflow)
         self.assertIn("cargo test --locked --manifest-path src-tauri/Cargo.toml --release", workflow)

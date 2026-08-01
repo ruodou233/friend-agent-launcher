@@ -188,21 +188,42 @@ pub(crate) fn write_bytes_atomic(path: &Path, data: &[u8]) -> Result<(), String>
     let temporary = path.with_extension("friend-agent.tmp");
     let backup = path.with_extension("friend-agent.bak");
     let _ = fs::remove_file(&temporary);
-    if fs::write(&temporary, data).is_err() {
-        let _ = fs::remove_file(&temporary);
-        return Err("写入临时配置失败".into());
-    }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(path)
-            .map(|metadata| metadata.permissions().mode())
-            .unwrap_or(0o600);
-        if fs::set_permissions(&temporary, fs::Permissions::from_mode(mode)).is_err() {
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).read(true).write(true);
+    let mut temporary_file = match options.open(&temporary) {
+        Ok(file) => file,
+        Err(_) => {
             let _ = fs::remove_file(&temporary);
-            return Err("设置配置权限失败".into());
+            return Err("写入临时配置失败".into());
         }
+    };
+
+    let write_result = (|| -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(path)
+                .map(|metadata| metadata.permissions().mode())
+                .unwrap_or(0o600);
+            fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))
+                .map_err(|_| "设置配置权限失败".to_string())?;
+        }
+
+        temporary_file
+            .write_all(data)
+            .map_err(|_| "写入临时配置失败".to_string())?;
+        temporary_file
+            .flush()
+            .map_err(|_| "刷新临时配置失败".to_string())?;
+        temporary_file
+            .sync_all()
+            .map_err(|_| "同步临时配置失败".to_string())
+    })();
+    drop(temporary_file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
     }
 
     if backup.exists() {
@@ -403,11 +424,18 @@ pub(crate) fn recovery_journal_path(directory: &Path) -> std::path::PathBuf {
 }
 
 fn sync_file_and_parent(path: &Path) -> Result<(), String> {
-    let file = fs::File::open(path)
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
         .map_err(|_| recovery_required("RECOVERY_REQUIRED journal 读回后无法同步"))?;
     file.sync_all()
         .map_err(|_| recovery_required("RECOVERY_REQUIRED journal 无法同步"))?;
 
+    // Unix can fsync the parent directory to persist the atomic rename. Windows
+    // has no portable directory-fsync operation in std; the successful file
+    // flush/sync above is the available content-durability guarantee there, so
+    // the missing directory sync is not treated as a failed journal write.
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
         let directory = fs::File::open(parent)
@@ -712,7 +740,8 @@ mod tests {
         let lock = CLAUDE_TRANSACTION_LOCK.get().expect("initialized lock");
         assert!(lock.try_lock().is_err());
         drop(guard);
-        assert!(lock.try_lock().is_ok());
+        let reacquired_guard = lock.lock().expect("released process lock");
+        drop(reacquired_guard);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -753,8 +782,10 @@ mod tests {
         let root = std::env::temp_dir().join("friend-agent-recovery-journal-check-test");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("test root");
-        let blocked_location = root.join("not-a-directory");
-        fs::write(&blocked_location, b"fixture").expect("blocked location");
+        // A NUL byte is rejected by path APIs on both Unix and Windows, so this
+        // fixture deterministically exercises an uninspectable location without
+        // relying on platform-specific permission-bit behavior.
+        let blocked_location = root.join("not-a-directory\0");
 
         let error = ensure_no_recovery_journal(&root, &blocked_location)
             .expect_err("uninspectable journal location must block");
