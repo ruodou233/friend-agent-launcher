@@ -12,6 +12,7 @@ import os
 import platform
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ import unittest
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Optional
 from unittest.mock import patch
 
@@ -39,6 +41,8 @@ def run_command(
         cwd=str(cwd),
         env=env,
         text=True,
+        encoding="utf-8",
+        errors="strict",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -247,8 +251,15 @@ def preflight_body(**overrides) -> bytes:
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
-def create_mounted_dmg_fixture(root: Path, *, applications_target: str = "/Applications") -> None:
-    write_file(root / ".DS_Store", "ds store")
+def create_mounted_dmg_fixture(
+    root: Path,
+    *,
+    applications_target: str = "/Applications",
+    include_ds_store: bool = True,
+    include_applications_link: bool = True,
+) -> None:
+    if include_ds_store:
+        write_file(root / ".DS_Store", "ds store")
     write_file(root / ".VolumeIcon.icns", "volume icon")
     write_file(root / "Friend Claude.app" / "Contents" / "Info.plist", "plist")
     write_file(
@@ -259,10 +270,97 @@ def create_mounted_dmg_fixture(root: Path, *, applications_target: str = "/Appli
         root / "Friend Claude.app" / "Contents" / "Resources" / "icon.icns",
         "icon fixture",
     )
-    create_symlink(root / "Applications", Path(applications_target), target_is_directory=True)
+    if include_applications_link:
+        create_symlink(root / "Applications", Path(applications_target), target_is_directory=True)
+    else:
+        # Windows cannot faithfully exercise the POSIX /Applications link
+        # spelling. Tests that target other mounted-DMG rules replace this
+        # placeholder's lstat/readlink result with a synthetic link contract.
+        write_file(root / "Applications", "Applications link placeholder")
+
+
+def create_platform_neutral_mounted_dmg_fixture(
+    root: Path, *, include_ds_store: bool = True
+) -> None:
+    create_mounted_dmg_fixture(
+        root,
+        include_ds_store=include_ds_store,
+        include_applications_link=os.name != "nt",
+    )
+
+
+def validate_mounted_dmg_with_synthetic_applications_link(
+    verifier, mount_dir: Path, *, applications_target: str = "/Applications"
+) -> None:
+    """Unit-test mounted-DMG rules without depending on Windows link spelling."""
+
+    applications = mount_dir / "Applications"
+    original_lstat = verifier.os.lstat
+    original_readlink = verifier.os.readlink
+
+    def synthetic_lstat(path):
+        if Path(path) == applications:
+            return SimpleNamespace(st_mode=stat.S_IFLNK)
+        return original_lstat(path)
+
+    def synthetic_readlink(path):
+        if Path(path) == applications:
+            return applications_target
+        return original_readlink(path)
+
+    with patch.object(verifier.os, "lstat", side_effect=synthetic_lstat), patch.object(
+        verifier.os, "readlink", side_effect=synthetic_readlink
+    ):
+        verifier.validate_mounted_dmg(mount_dir)
+
+
+def validate_mounted_dmg_for_platform_test(verifier, mount_dir: Path) -> None:
+    """Use a real link on POSIX and a narrow unit seam on Windows."""
+
+    if os.name == "nt":
+        validate_mounted_dmg_with_synthetic_applications_link(verifier, mount_dir)
+    else:
+        verifier.validate_mounted_dmg(mount_dir)
 
 
 class ReleaseSupportTests(unittest.TestCase):
+    def test_run_command_uses_explicit_utf8_strict_decoding(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["fixture-command"], 0, stdout="", stderr=""
+        )
+        with patch.object(subprocess, "run", return_value=completed) as run:
+            self.assertIs(run_command(["fixture-command"]), completed)
+
+        run.assert_called_once_with(
+            ["fixture-command"],
+            cwd=str(ROOT),
+            env=None,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    def test_run_command_decodes_utf8_diagnostics(self) -> None:
+        result = run_command(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.buffer.write('中文 stderr\\n'.encode('utf-8'))",
+            ]
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stderr, "中文 stderr\n")
+
+    def test_create_fifo_skips_when_mkfifo_is_unavailable(self) -> None:
+        with patch.object(
+            os, "mkfifo", side_effect=AttributeError("mkfifo unavailable"), create=True
+        ):
+            with self.assertRaises(unittest.SkipTest):
+                create_fifo(Path("unused-fifo"))
+
     def test_git_bash_path_converts_windows_drive_absolute_path(self) -> None:
         self.assertEqual(
             git_bash_path(Path(r"D:\a\friend-agent-launcher\scripts\scan-secrets.sh")),
@@ -616,14 +714,52 @@ class ReleaseSupportTests(unittest.TestCase):
                 verifier.validate_release_directory(nested)
 
     def test_mounted_dmg_allowlist_accepts_current_unsigned_candidate_tree(self) -> None:
+        if os.name == "nt":
+            self.skipTest("exact /Applications symlink semantics require POSIX")
+
         verifier = load_verify_module()
 
-        with tempfile.TemporaryDirectory() as temporary:
-            mount_dir = Path(temporary) / "mounted-dmg"
-            create_mounted_dmg_fixture(mount_dir)
-            verifier.validate_mounted_dmg(mount_dir)
-            result = run_verify("--action", "artifact-check", "--dmg-mount", str(mount_dir))
-            self.assertEqual(result.returncode, 0, result.stderr)
+        for include_ds_store in (True, False):
+            with self.subTest(include_ds_store=include_ds_store), tempfile.TemporaryDirectory() as temporary:
+                mount_dir = Path(temporary) / "mounted-dmg"
+                create_mounted_dmg_fixture(mount_dir, include_ds_store=include_ds_store)
+                verifier.validate_mounted_dmg(mount_dir)
+                result = run_verify("--action", "artifact-check", "--dmg-mount", str(mount_dir))
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_mounted_dmg_allowlist_covers_root_and_ds_store_variants(self) -> None:
+        verifier = load_verify_module()
+
+        for include_ds_store in (True, False):
+            with self.subTest(include_ds_store=include_ds_store), tempfile.TemporaryDirectory() as temporary:
+                mount_dir = Path(temporary) / "mounted-dmg"
+                create_platform_neutral_mounted_dmg_fixture(
+                    mount_dir, include_ds_store=include_ds_store
+                )
+                validate_mounted_dmg_for_platform_test(verifier, mount_dir)
+
+    def test_mounted_dmg_applications_link_contract_remains_exact(self) -> None:
+        verifier = load_verify_module()
+
+        for applications_target, valid in (
+            ("/Applications", True),
+            ("/tmp", False),
+            (r"\Applications", False),
+        ):
+            with self.subTest(applications_target=applications_target), tempfile.TemporaryDirectory() as temporary:
+                mount_dir = Path(temporary) / "mounted-dmg"
+                create_mounted_dmg_fixture(
+                    mount_dir, include_applications_link=False
+                )
+                if valid:
+                    validate_mounted_dmg_with_synthetic_applications_link(
+                        verifier, mount_dir, applications_target=applications_target
+                    )
+                else:
+                    with self.assertRaises(verifier.ReleaseGateError):
+                        validate_mounted_dmg_with_synthetic_applications_link(
+                            verifier, mount_dir, applications_target=applications_target
+                        )
 
     def test_mounted_dmg_allowlist_rejects_extra_env_and_official_app(self) -> None:
         verifier = load_verify_module()
@@ -631,15 +767,18 @@ class ReleaseSupportTests(unittest.TestCase):
         for extra in (".env.test", "Claude.app"):
             with self.subTest(extra=extra), tempfile.TemporaryDirectory() as temporary:
                 mount_dir = Path(temporary) / "mounted-dmg"
-                create_mounted_dmg_fixture(mount_dir)
+                create_platform_neutral_mounted_dmg_fixture(mount_dir)
                 if extra == ".env.test":
                     write_file(mount_dir / extra, "unexpected")
                 else:
                     write_file(mount_dir / extra / "Contents" / "Info.plist", "unexpected")
                 with self.assertRaises(verifier.ReleaseGateError):
-                    verifier.validate_mounted_dmg(mount_dir)
+                    validate_mounted_dmg_for_platform_test(verifier, mount_dir)
 
     def test_mounted_dmg_allowlist_rejects_wrong_and_extra_symlinks(self) -> None:
+        if os.name == "nt":
+            self.skipTest("exact mounted-DMG symlink semantics require POSIX")
+
         verifier = load_verify_module()
 
         cases = ("wrong-target", "extra-symlink")
@@ -654,6 +793,39 @@ class ReleaseSupportTests(unittest.TestCase):
                     create_symlink(mount_dir / "unexpected-link", Path("/Applications"), target_is_directory=True)
                 with self.assertRaises(verifier.ReleaseGateError):
                     verifier.validate_mounted_dmg(mount_dir)
+
+    def test_mounted_dmg_allowlist_rejects_non_regular_ds_store_objects(self) -> None:
+        verifier = load_verify_module()
+
+        for object_type in ("directory", "symlink"):
+            with self.subTest(object_type=object_type), tempfile.TemporaryDirectory() as temporary:
+                temporary_root = Path(temporary)
+                mount_dir = temporary_root / "mounted-dmg"
+                create_platform_neutral_mounted_dmg_fixture(mount_dir)
+                ds_store = mount_dir / ".DS_Store"
+                remove_tree_entry(ds_store)
+                if object_type == "directory":
+                    ds_store.mkdir()
+                else:
+                    target = temporary_root / "outside-ds-store"
+                    write_file(target, "not Finder metadata")
+                    create_symlink(ds_store, target, target_is_directory=False)
+
+                with self.assertRaises(verifier.ReleaseGateError):
+                    validate_mounted_dmg_for_platform_test(verifier, mount_dir)
+
+    def test_mounted_dmg_allowlist_rejects_special_ds_store_object(self) -> None:
+        verifier = load_verify_module()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            mount_dir = Path(temporary) / "mounted-dmg"
+            create_platform_neutral_mounted_dmg_fixture(mount_dir)
+            remove_tree_entry(mount_dir / ".DS_Store")
+            special_file = mount_dir / ".DS_Store"
+            create_fifo(special_file)
+
+            with self.assertRaises(verifier.ReleaseGateError):
+                validate_mounted_dmg_for_platform_test(verifier, mount_dir)
 
     def test_macho_architecture_allowlist_accepts_only_arm64(self) -> None:
         verifier = load_verify_module()

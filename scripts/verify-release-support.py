@@ -37,7 +37,11 @@ CANDIDATE_REQUIRED_ROOT_ENTRIES = frozenset({"dmg", "share"})
 CANDIDATE_DMG_HELPER_NAMES = frozenset({"bundle_dmg.sh", "icon.icns"})
 CANDIDATE_DMG_REQUIRED_HELPER_NAMES = frozenset({"bundle_dmg.sh"})
 EXPECTED_SHARE_FILES = frozenset({"template.applescript", "eula-resources-template.xml"})
-MOUNTED_DMG_ROOT_FILES = frozenset({".DS_Store", ".VolumeIcon.icns"})
+# Finder may create .DS_Store in a mounted DMG on some macOS environments and
+# omit it in others. Keep that variability limited to this exact, non-runtime
+# metadata name; all other root entries remain part of the strict allowlist.
+MOUNTED_DMG_REQUIRED_ROOT_FILES = frozenset({".VolumeIcon.icns"})
+MOUNTED_DMG_OPTIONAL_ROOT_FILES = frozenset({".DS_Store"})
 MOUNTED_DMG_APP_CONTENTS = frozenset({"Info.plist", "MacOS", "Resources"})
 REQUIRED_MACH_O_ARCHS = "arm64"
 
@@ -303,18 +307,28 @@ def validate_release_directory(release_dir: Path, require_outputs: bool = False)
         raise ReleaseGateError("release directory must contain the candidate DMG and checksum")
 
 
-def _require_exact_entries(directory: Path, expected: Iterable[str], label: str) -> Dict[str, Path]:
-    """Return exact direct children while preserving lstat types for a mounted DMG."""
+def _require_exact_entries(
+    directory: Path,
+    expected: Iterable[str],
+    label: str,
+    *,
+    optional: Iterable[str] = (),
+) -> Dict[str, Path]:
+    """Return direct children from an exact allowlist, with an optional subset."""
 
     try:
         entries = list(os.scandir(directory))
     except OSError as exc:
         raise ReleaseGateError(f"{label} cannot be inspected") from exc
     expected_names = set(expected)
+    optional_names = set(optional)
+    if not optional_names <= expected_names:
+        raise ReleaseGateError(f"{label} has an invalid optional-entry configuration")
+    required_names = expected_names - optional_names
     actual_names = {entry.name for entry in entries}
-    if actual_names != expected_names:
-        unexpected = sorted(actual_names - expected_names)
-        missing = sorted(expected_names - actual_names)
+    missing = sorted(required_names - actual_names)
+    unexpected = sorted(actual_names - expected_names)
+    if missing or unexpected:
         details = ", ".join(unexpected or missing)
         raise ReleaseGateError(f"{label} has an unexpected or missing entry: {details}")
     return {entry.name: Path(entry.path) for entry in entries}
@@ -342,11 +356,19 @@ def validate_mounted_dmg(mount_dir: Path) -> None:
 
     root_entries = _require_exact_entries(
         mount_dir,
-        MOUNTED_DMG_ROOT_FILES | {"Applications", "Friend Claude.app"},
+        MOUNTED_DMG_REQUIRED_ROOT_FILES
+        | MOUNTED_DMG_OPTIONAL_ROOT_FILES
+        | {"Applications", "Friend Claude.app"},
         "mounted DMG root",
+        optional=MOUNTED_DMG_OPTIONAL_ROOT_FILES,
     )
-    for name in MOUNTED_DMG_ROOT_FILES:
-        _require_real_file(root_entries[name], f"mounted DMG {name}")
+    # .DS_Store is opaque Finder metadata, not a runtime payload. Its format
+    # and filesystem metadata vary across macOS versions, so lstat must prove
+    # only that an explicitly allowlisted instance is a regular file; the
+    # caller's artifact scan still inspects its bytes for forbidden content.
+    for name in MOUNTED_DMG_REQUIRED_ROOT_FILES | MOUNTED_DMG_OPTIONAL_ROOT_FILES:
+        if name in root_entries:
+            _require_real_file(root_entries[name], f"mounted DMG {name}")
 
     applications = root_entries["Applications"]
     try:
