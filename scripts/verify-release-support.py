@@ -37,6 +37,9 @@ CANDIDATE_REQUIRED_ROOT_ENTRIES = frozenset({"dmg", "share"})
 CANDIDATE_DMG_HELPER_NAMES = frozenset({"bundle_dmg.sh", "icon.icns"})
 CANDIDATE_DMG_REQUIRED_HELPER_NAMES = frozenset({"bundle_dmg.sh"})
 EXPECTED_SHARE_FILES = frozenset({"template.applescript", "eula-resources-template.xml"})
+MOUNTED_DMG_ROOT_FILES = frozenset({".DS_Store", ".VolumeIcon.icns"})
+MOUNTED_DMG_APP_CONTENTS = frozenset({"Info.plist", "MacOS", "Resources"})
+REQUIRED_MACH_O_ARCHS = "arm64"
 
 
 class ReleaseGateError(Exception):
@@ -300,6 +303,85 @@ def validate_release_directory(release_dir: Path, require_outputs: bool = False)
         raise ReleaseGateError("release directory must contain the candidate DMG and checksum")
 
 
+def _require_exact_entries(directory: Path, expected: Iterable[str], label: str) -> Dict[str, Path]:
+    """Return exact direct children while preserving lstat types for a mounted DMG."""
+
+    try:
+        entries = list(os.scandir(directory))
+    except OSError as exc:
+        raise ReleaseGateError(f"{label} cannot be inspected") from exc
+    expected_names = set(expected)
+    actual_names = {entry.name for entry in entries}
+    if actual_names != expected_names:
+        unexpected = sorted(actual_names - expected_names)
+        missing = sorted(expected_names - actual_names)
+        details = ", ".join(unexpected or missing)
+        raise ReleaseGateError(f"{label} has an unexpected or missing entry: {details}")
+    return {entry.name: Path(entry.path) for entry in entries}
+
+
+def _require_real_file(path: Path, label: str) -> None:
+    if not _is_real_file(path):
+        raise ReleaseGateError(f"{label} must be a regular file")
+
+
+def _require_real_directory(path: Path, label: str) -> None:
+    if not _is_real_directory(path):
+        raise ReleaseGateError(f"{label} must be a directory")
+
+
+def validate_mounted_dmg(mount_dir: Path) -> None:
+    """Validate the exact unsigned Claude candidate tree exposed by hdiutil."""
+
+    try:
+        root_info = os.lstat(mount_dir)
+    except (FileNotFoundError, OSError) as exc:
+        raise ReleaseGateError("mounted DMG is missing or cannot be inspected") from exc
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        raise ReleaseGateError("mounted DMG root must be a real directory")
+
+    root_entries = _require_exact_entries(
+        mount_dir,
+        MOUNTED_DMG_ROOT_FILES | {"Applications", "Friend Claude.app"},
+        "mounted DMG root",
+    )
+    for name in MOUNTED_DMG_ROOT_FILES:
+        _require_real_file(root_entries[name], f"mounted DMG {name}")
+
+    applications = root_entries["Applications"]
+    try:
+        applications_info = os.lstat(applications)
+        applications_target = os.readlink(applications) if stat.S_ISLNK(applications_info.st_mode) else None
+    except OSError as exc:
+        raise ReleaseGateError("mounted DMG Applications link cannot be inspected") from exc
+    if not stat.S_ISLNK(applications_info.st_mode) or applications_target != "/Applications":
+        raise ReleaseGateError("mounted DMG Applications must link exactly to /Applications")
+
+    app = root_entries["Friend Claude.app"]
+    _require_real_directory(app, "mounted DMG Friend Claude.app")
+    contents = app / "Contents"
+    _require_real_directory(contents, "Friend Claude.app/Contents")
+    contents_entries = _require_exact_entries(contents, MOUNTED_DMG_APP_CONTENTS, "Friend Claude.app/Contents")
+    _require_real_file(contents_entries["Info.plist"], "Friend Claude.app/Contents/Info.plist")
+
+    macos_dir = contents_entries["MacOS"]
+    _require_real_directory(macos_dir, "Friend Claude.app/Contents/MacOS")
+    macos_entries = _require_exact_entries(macos_dir, {"friend-agent-launcher"}, "Friend Claude.app/Contents/MacOS")
+    _require_real_file(macos_entries["friend-agent-launcher"], "Friend Claude.app/Contents/MacOS/friend-agent-launcher")
+
+    resources_dir = contents_entries["Resources"]
+    _require_real_directory(resources_dir, "Friend Claude.app/Contents/Resources")
+    resources_entries = _require_exact_entries(resources_dir, {"icon.icns"}, "Friend Claude.app/Contents/Resources")
+    _require_real_file(resources_entries["icon.icns"], "Friend Claude.app/Contents/Resources/icon.icns")
+
+
+def validate_macho_archs(archs: str) -> None:
+    """Require the exact text emitted by ``lipo -archs`` for this candidate."""
+
+    if archs != REQUIRED_MACH_O_ARCHS:
+        raise ReleaseGateError("Friend Claude.app launcher must be arm64-only")
+
+
 def _require_wrapper() -> None:
     """Apply an accidental-misuse guard, not an unforgeable build boundary."""
 
@@ -394,12 +476,18 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser.add_argument("--file", type=Path, default=default_file)
     parser.add_argument("--product", choices=("claude", "codex"))
     parser.add_argument("--system", choices=("macos", "windows"))
-    parser.add_argument("--action", choices=("check", "build", "upload", "artifact-check"), default="check")
+    parser.add_argument(
+        "--action",
+        choices=("check", "build", "upload", "artifact-check", "macho-archs"),
+        default="check",
+    )
     parser.add_argument("--require-host", choices=("macos", "windows"))
     parser.add_argument("--require-wrapper", action="store_true")
     parser.add_argument("--p0-evidence-file", type=Path)
     parser.add_argument("--candidate-bundle", type=Path)
     parser.add_argument("--release-dir", type=Path)
+    parser.add_argument("--dmg-mount", type=Path)
+    parser.add_argument("--mach-o-archs")
     parser.add_argument("--require-release-files", action="store_true")
     return parser.parse_args(list(argv))
 
@@ -408,14 +496,25 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
         if args.action == "artifact-check":
-            if args.candidate_bundle is None and args.release_dir is None:
-                raise ReleaseGateError("artifact-check requires --candidate-bundle or --release-dir")
+            if args.candidate_bundle is None and args.release_dir is None and args.dmg_mount is None:
+                raise ReleaseGateError(
+                    "artifact-check requires --candidate-bundle, --release-dir, or --dmg-mount"
+                )
             if args.candidate_bundle is not None:
                 validate_candidate_bundle(args.candidate_bundle)
                 print("release gate: fresh Claude bundle allowlist passed")
             if args.release_dir is not None:
                 validate_release_directory(args.release_dir, require_outputs=args.require_release_files)
                 print("release gate: release/macos allowlist passed")
+            if args.dmg_mount is not None:
+                validate_mounted_dmg(args.dmg_mount)
+                print("release gate: mounted DMG allowlist passed")
+            return 0
+        if args.action == "macho-archs":
+            if args.mach_o_archs is None:
+                raise ReleaseGateError("macho-archs requires --mach-o-archs")
+            validate_macho_archs(args.mach_o_archs)
+            print("release gate: Mach-O architecture allowlist passed")
             return 0
         return run_gate(
             args.file,

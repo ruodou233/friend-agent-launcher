@@ -10,7 +10,7 @@
 - **Claude Windows**：`blocked`。
 - **Codex macOS / Windows**：`blocked`，仅保留脱敏 research；不构建、不打包、不发布 Codex artifact。
 - **Friend gateway**：仓内已有可运行的 dependency-free `reference/mock`，覆盖合同中的四条 Friend 路径；本地测试不需要真实凭据。`proxy` 只表示显式 adapter 边界，不代表真实上游已接通。
-- **真实外部链路**：VPS、公网 HTTPS/TLS、真实 New API catalog/balance adapter、朋友设备可达性、P0 和签名分发均未验证；`new-api-deployment/` 是未部署模板。
+- **真实外部链路**：VPS、公网 HTTPS/TLS、真实 New API catalog/balance adapter、朋友设备可达性、P0 和签名分发均未验证；`new-api-deployment/` 是未部署模板。Preflight 只证明显式配置的 endpoint 在当时可达且合同匹配，不代表真实 New API、带 Key 业务链路或 P0 已验证。
 - `contracts/friend-api.openapi.json` 和 `release-support.json` 是无密钥机器契约/门禁数据，不代表服务已经上线。
 
 公开仓库不包含 Friend Key、上游 Key、账号密码、真实域名或官方 App 二进制。没有真实固定网关时，客户端运行时失败关闭；候选包也不构成可用发行版。
@@ -58,6 +58,10 @@ bash scripts/scan-secrets.sh
 构建流程由 `scripts/build-macos.sh` 统一编排；其中 wrapper 环境变量检查只用于阻止误用，不是安全边界，也不能证明构建不可由其他方式触发。真正的发布依据是 CI、支持矩阵、最终产物 allowlist、secret scan 和 P0 evidence。这不产生朋友可直接安装的发行包。
 
 如果本机不是 Node.js 22.x，仍可运行契约校验、静态前端构建、Rust 格式检查和测试，但结果必须记录 Node 版本偏差；不因版本偏差宣称候选包可发布，也不安装系统软件来规避门禁。
+
+## 朋友现场测试套件
+
+当前仍没有已验证的公网网关，所以现在不能生成朋友包。Preflight 只证明显式配置的 endpoint 在当时可达且合同匹配，不代表真实 New API、带 Key 链路或 P0；未来完成真实网关验证后，在 macOS Apple Silicon 上显式设置 `FRIEND_GATEWAY_URL`，再运行 `bash scripts/prepare-friend-test-kit.sh`。
 
 ## 不修改官方 App
 
