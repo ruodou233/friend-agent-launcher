@@ -6,14 +6,16 @@
 
 ## 当前状态
 
-- **Claude macOS**：`candidate`，只允许在 macOS 上生成本地 CI/现场验证包；使用前必须已经安装官方 Claude Desktop。当前不宣称“下载即安装”“一键可用”或朋友可直接使用。
-- **Claude Windows**：`blocked`。
+- **Claude macOS**：公开 `candidate` 只允许在 macOS 上生成本地 CI/现场验证包；公开启动器流程使用前必须已经安装官方 Claude Desktop。当前不宣称“下载即安装”“一键可用”或朋友可直接使用。
+- **Claude Windows**：公开 release matrix 仍为 `blocked`；私有构建器可生成 fresh-install candidate，但不等于 Windows release。
 - **Codex macOS / Windows**：`blocked`，仅保留脱敏 research；不构建、不打包、不发布 Codex artifact。
 - **Friend gateway**：仓内已有可运行的 dependency-free `reference/mock`，覆盖合同中的四条 Friend 路径；本地测试不需要真实凭据。`proxy` 只表示显式 adapter 边界，不代表真实上游已接通。
 - **真实外部链路**：VPS、公网 HTTPS/TLS、真实 New API catalog/balance adapter、朋友设备可达性、P0 和签名分发均未验证；`new-api-deployment/` 是未部署模板。Preflight 只证明显式配置的 endpoint 在当时可达且合同匹配，不代表真实 New API、带 Key 业务链路或 P0 已验证。
 - `contracts/friend-api.openapi.json` 和 `release-support.json` 是无密钥机器契约/门禁数据，不代表服务已经上线。
 
 公开仓库不包含 Friend Key、上游 Key、账号密码、真实域名或官方 App 二进制。没有真实固定网关时，客户端运行时失败关闭；候选包也不构成可用发行版。
+
+私有 Claude macOS/Windows 候选包构建器的边界与参数见 [`docs/private-claude-kit.md`](docs/private-claude-kit.md)；它只产出仓库外的私有候选包，不改变公开 release matrix。
 
 ## 当前客户端边界
 
@@ -31,7 +33,7 @@ Claude 的 configure/current-key/restore 文件事务同时持有进程 Mutex �
 2. **邀请**：只打开人工登记入口，不承诺自动到账或自动结算。
 3. **免费第三方**：只打开外链，不接受第三方 Key、Endpoint 或 Provider。
 
-“打开官方获取页”只是外链入口，不是安装器；官方 App 需要用户自行安装并在启动器中复检。
+在公开启动器流程中，“打开官方获取页”只是外链入口，不是安装器；官方 App 需要用户自行安装并在启动器中复检。私有候选包构建器接收仓库外安装器，不改变公开启动器边界。
 
 ## 构建、测试与门禁
 
@@ -61,10 +63,10 @@ bash scripts/scan-secrets.sh
 
 ## 朋友现场测试套件
 
-当前仍没有已验证的公网网关，所以现在不能生成朋友包。Preflight 只证明显式配置的 endpoint 在当时可达且合同匹配，不代表真实 New API、带 Key 链路或 P0；未来完成真实网关验证后，在 macOS Apple Silicon 上显式设置 `FRIEND_GATEWAY_URL`，再运行 `bash scripts/prepare-friend-test-kit.sh`。
+当前仍没有已验证的公网网关，所以不能生成可供朋友使用的公开发行包。Preflight 只证明显式配置的 endpoint 在当时可达且合同匹配，不代表真实 New API、带 Key 链路或 P0；未来完成真实网关验证后，在 macOS Apple Silicon 上显式设置 `FRIEND_GATEWAY_URL`，再运行 `bash scripts/prepare-friend-test-kit.sh`。私有候选包构建器是独立的仓外输入流程，不改变这条公开发布边界。
 
 ## 不修改官方 App
 
-Friend 的边界是辅助配置和启动，不复制官方 UI，不接管官方更新，不把官方 App 放进本仓库。当前公开状态仅支持已安装官方 App 后的 Claude macOS 本地候选验证；Windows、Codex、朋友分发、VPS 上线和公开 Release 都等待各自门禁与真实 P0 证据。
+Friend 的边界是辅助配置和启动，不复制官方 UI，不接管官方更新，不把官方 App 放进本仓库。当前公开状态仅支持已安装官方 App 后的 Claude macOS 本地候选验证；Windows 公开发布、Codex、朋友分发、VPS 上线和公开 Release 都等待各自门禁与真实 P0 证据。私有 Windows candidate 不改变这条发布边界。
 
 项目采用 MIT 许可证；新增依赖和未来发布产物仍需单独做许可证与凭据扫描。
