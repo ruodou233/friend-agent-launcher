@@ -28,3 +28,24 @@ jobs:
           python-version: "3.12"
       - name: Run offline kit tests
         run: python -m unittest tests.test_offline_desktop_kit
+      - name: Compile builder
+        run: python -m py_compile offline-desktop-kit/build_offline_desktop_kits.py
+      - name: Parse macOS installers
+        if: runner.os == 'macOS'
+        shell: bash
+        run: find offline-desktop-kit/templates -name '*.command' -print0 | xargs -0 -n1 zsh -n
+      - name: Parse Windows installers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem offline-desktop-kit/templates -Recurse -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "$($_.Extent.File):$($_.Extent.StartLineNumber): $($_.Message)" }
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }

@@ -164,31 +164,52 @@ def write_checksums(root: Path) -> None:
 
 def write_zip(source_root: Path, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
-    if output.exists():
+    if os.path.lexists(output):
         raise BuildError(f"refusing to overwrite existing output: {output}")
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True) as archive:
-        entries = []
-        for current, dirnames, filenames in os.walk(source_root, followlinks=False):
-            current_path = Path(current)
-            for dirname in list(dirnames):
-                candidate = current_path / dirname
-                if candidate.is_symlink():
-                    entries.append(candidate)
-                    dirnames.remove(dirname)
-            entries.extend(current_path / filename for filename in filenames)
-        for path in sorted(entries):
-            arcname = (Path(source_root.name) / path.relative_to(source_root)).as_posix()
-            if path.is_symlink():
-                info = zipfile.ZipInfo(arcname)
-                info.create_system = 3
-                info.external_attr = (stat.S_IFLNK | 0o777) << 16
-                archive.writestr(info, os.readlink(path).encode("utf-8"))
-            else:
-                info = zipfile.ZipInfo.from_file(path, arcname)
-                info.create_system = 3
-                info.compress_type = zipfile.ZIP_DEFLATED
-                info.external_attr = (path.stat().st_mode & 0xFFFF) << 16
-                archive.writestr(info, path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output.name}.", suffix=".tmp", dir=output.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        with zipfile.ZipFile(
+            temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True
+        ) as archive:
+            entries = []
+            for current, dirnames, filenames in os.walk(source_root, followlinks=False):
+                current_path = Path(current)
+                for dirname in list(dirnames):
+                    candidate = current_path / dirname
+                    if candidate.is_symlink():
+                        entries.append(candidate)
+                        dirnames.remove(dirname)
+                entries.extend(current_path / filename for filename in filenames)
+            for path in sorted(entries):
+                arcname = (Path(source_root.name) / path.relative_to(source_root)).as_posix()
+                if path.is_symlink():
+                    info = zipfile.ZipInfo(arcname)
+                    info.create_system = 3
+                    info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                    archive.writestr(info, os.readlink(path).encode("utf-8"))
+                else:
+                    info = zipfile.ZipInfo.from_file(path, arcname)
+                    info.create_system = 3
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    info.external_attr = (path.stat().st_mode & 0xFFFF) << 16
+                    archive.writestr(
+                        info,
+                        path.read_bytes(),
+                        compress_type=zipfile.ZIP_DEFLATED,
+                        compresslevel=9,
+                    )
+        try:
+            os.link(temporary, output)
+        except FileExistsError as exc:
+            raise BuildError(f"refusing to overwrite existing output: {output}") from exc
+        except OSError as exc:
+            raise BuildError(f"cannot publish output atomically: {output}: {exc}") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def require_outside_repo(path: Path, label: str) -> Path:

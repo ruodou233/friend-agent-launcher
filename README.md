@@ -14,7 +14,7 @@
 
 - **Claude macOS**：公开 `candidate` 只允许在 macOS 上生成本地 CI/现场验证包；公开启动器流程使用前必须已经安装官方 Claude Desktop。当前不宣称“下载即安装”“一键可用”或朋友可直接使用。
 - **Claude Windows**：公开 release matrix 仍为 `blocked`；私有构建器可生成 fresh-install candidate，但不等于 Windows release。
-- **Codex macOS / Windows**：`blocked`，仅保留脱敏 research；不构建、不打包、不发布 Codex artifact。
+- **Codex macOS / Windows**：公开 Tauri/Release 流程仍为 `blocked`；`offline-desktop-kit/` 只允许使用者在仓库外自行组装本地测试 ZIP，不向公开 Release 上传 Codex 二进制或预构建产物。
 - **Friend gateway**：仓内已有可运行的 dependency-free `reference/mock`，覆盖合同中的四条 Friend 路径；本地测试不需要真实凭据。`proxy` 只表示显式 adapter 边界，不代表真实上游已接通。
 - **真实外部链路**：VPS、公网 HTTPS/TLS、真实 New API catalog/balance adapter、朋友设备可达性、P0 和签名分发均未验证；`new-api-deployment/` 是未部署模板。Preflight 只证明显式配置的 endpoint 在当时可达且合同匹配，不代表真实 New API、带 Key 业务链路或 P0 已验证。
 - `contracts/friend-api.openapi.json` 和 `release-support.json` 是无密钥机器契约/门禁数据，不代表服务已经上线。

@@ -46,6 +46,10 @@ version_at_least() {
   }'
 }
 
+version_greater() {
+  version_at_least "$1" "$2" && ! version_at_least "$2" "$1"
+}
+
 install_dmg_app() {
   local dmg="$1"
   local expected_bundle="$2"
@@ -96,6 +100,14 @@ client_installer="$ASSETS/$client_asset"
 [[ -f "$client_installer" ]] || die "离线安装包缺少官方 $client_label 安装器；本包不会访问境外下载源。"
 install_dmg_app "$client_installer" "$client_bundle_id" "$client_app_name" "$official_team_identifier"
 
+installed_client_path="$USER_APPS/$client_app_name.app"
+if [[ ! -d "$installed_client_path" && -d "/Applications/$client_app_name.app" ]]; then
+  installed_client_path="/Applications/$client_app_name.app"
+fi
+[[ -d "$installed_client_path" ]] || die "Cannot locate the installed $client_label app."
+installed_client_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$installed_client_path/Contents/Info.plist")"
+bundled_client_version="$(read_manifest official_client_version)"
+
 runtime_archive="$ASSETS/codex-primary-runtime.tar.xz"
 runtime_sha="$(read_manifest codex_primary_runtime_sha256)"
 [[ -f "$runtime_archive" ]] || die "离线包缺少 Codex Primary Runtime。"
@@ -103,10 +115,36 @@ actual_runtime_sha="$(/usr/bin/shasum -a 256 "$runtime_archive" | /usr/bin/awk '
 [[ "$actual_runtime_sha" == "$runtime_sha" ]] || die "Codex Primary Runtime 校验失败。"
 runtime_parent="$TARGET_HOME/.cache/codex-runtimes"
 /bin/mkdir -p "$runtime_parent"
-/usr/bin/tar -xJf "$runtime_archive" -C "$runtime_parent"
-installed_runtime="$(/usr/bin/plutil -extract bundleVersion raw -o - "$runtime_parent/codex-primary-runtime/runtime.json" 2>/dev/null || true)"
 expected_runtime="$(read_manifest codex_primary_runtime_version)"
-[[ "$installed_runtime" == "$expected_runtime" ]] || die "Codex Primary Runtime 版本不匹配。"
+runtime_target="$runtime_parent/codex-primary-runtime"
+installed_runtime="$(/usr/bin/plutil -extract bundleVersion raw -o - "$runtime_target/runtime.json" 2>/dev/null || true)"
+if version_greater "$installed_client_version" "$bundled_client_version"; then
+  if [[ -n "$installed_runtime" ]] && version_greater "$installed_runtime" "$expected_runtime"; then
+    print "A newer $client_label client and newer Runtime $installed_runtime are already installed; keeping them."
+  else
+    die "A newer $client_label client ($installed_client_version) is installed, but its Runtime is missing or not newer than $expected_runtime. Use an updated offline kit."
+  fi
+elif [[ -n "$installed_runtime" ]] && version_at_least "$installed_runtime" "$expected_runtime"; then
+  print "Codex Primary Runtime $installed_runtime is already installed; keeping it."
+else
+  runtime_stage="$(/usr/bin/mktemp -d "$runtime_parent/.codex-primary-runtime.new.XXXXXX")"
+  runtime_backup="$runtime_parent/.codex-primary-runtime.backup.$$"
+  /usr/bin/tar -xJf "$runtime_archive" -C "$runtime_stage" || die "Codex Primary Runtime extraction failed."
+  staged_runtime="$runtime_stage/codex-primary-runtime"
+  staged_version="$(/usr/bin/plutil -extract bundleVersion raw -o - "$staged_runtime/runtime.json" 2>/dev/null || true)"
+  if [[ "$staged_version" != "$expected_runtime" ]]; then
+    /bin/rm -rf "$runtime_stage"
+    die "Codex Primary Runtime 版本不匹配。"
+  fi
+  if [[ -e "$runtime_target" ]]; then /bin/mv "$runtime_target" "$runtime_backup"; fi
+  if ! /bin/mv "$staged_runtime" "$runtime_target"; then
+    if [[ -e "$runtime_backup" && ! -e "$runtime_target" ]]; then /bin/mv "$runtime_backup" "$runtime_target"; fi
+    /bin/rm -rf "$runtime_stage"
+    die "Codex Primary Runtime replacement failed; the previous Runtime was restored."
+  fi
+  /bin/rm -rf "$runtime_stage"
+  if [[ -e "$runtime_backup" ]]; then /bin/rm -rf "$runtime_backup"; fi
+fi
 
 cc_dmg="$ASSETS/CC-Switch.dmg"
 [[ -f "$cc_dmg" ]] || die "离线安装包缺少 CC Switch；本包不会访问境外下载源。"

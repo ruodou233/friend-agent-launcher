@@ -148,6 +148,80 @@ class OfflineDesktopKitTests(unittest.TestCase):
             with self.assertRaises(MODULE.BuildError):
                 MODULE.build("claude-windows", base / "missing", base / "output")
 
+    def test_dangling_output_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            templates = base / "templates"
+            shutil.copytree(MODULE.TEMPLATES, templates, copy_function=shutil.copy2, symlinks=True)
+            assets = self.create_assets(base, "codex-windows-runtime")
+            pin_test_manifest(templates, "codex-windows-runtime", assets)
+            output = base / "output"
+            output.mkdir()
+            archive = output / "Friend-Codex-Windows-Offline-Runtime-open-source-build.zip"
+            escaped = base / "escaped.zip"
+            try:
+                os.symlink(escaped, archive)
+            except OSError as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+            old_templates = MODULE.TEMPLATES
+            MODULE.TEMPLATES = templates
+            try:
+                with self.assertRaises(MODULE.BuildError):
+                    MODULE.build("codex-windows-runtime", assets, output)
+                self.assertFalse(escaped.exists())
+                self.assertTrue(archive.is_symlink())
+            finally:
+                MODULE.TEMPLATES = old_templates
+
+    def test_templates_lock_upgrade_and_desktop_account_contracts(self):
+        for kit, bindings in MODULE.HASH_BINDINGS.items():
+            manifest_name = "runtime-manifest.json" if kit == "codex-windows-runtime" else "package-manifest.json"
+            manifest = json.loads((MODULE.TEMPLATES / kit / manifest_name).read_text(encoding="utf-8"))
+            self.assertIs(manifest["contains_real_keys"], False)
+            for _, keys in bindings:
+                value = manifest
+                for key in keys:
+                    value = value[key]
+                self.assertRegex(str(value), r"^[0-9a-f]{64}$")
+
+        windows_scripts = [
+            MODULE.TEMPLATES / "claude-windows/Windows/Install-And-Start.ps1",
+            MODULE.TEMPLATES / "codex-windows/Windows/Install-And-Start.ps1",
+            MODULE.TEMPLATES / "codex-windows-runtime/Windows/Install-Runtime.ps1",
+        ]
+        for script in windows_scripts:
+            text = script.read_text(encoding="utf-8-sig")
+            self.assertIn("S-1-5-18", text)
+            self.assertIn("SessionId", text)
+            self.assertIn("Get-InteractiveDesktopContext", text)
+            self.assertNotIn("using the current user profile", text)
+
+        codex_windows = windows_scripts[1].read_text(encoding="utf-8-sig")
+        codex_runtime = windows_scripts[2].read_text(encoding="utf-8-sig")
+        codex_macos = (MODULE.TEMPLATES / "codex-macos/macOS/Install-And-Start.command").read_text()
+        self.assertIn("NewerClientDetected", codex_windows)
+        self.assertIn(".codex-primary-runtime.new-", codex_windows)
+        self.assertLess(
+            codex_windows.index("if ($NewerClientDetected)"),
+            codex_windows.index("if ($existingVersion -and $existingVersion -ge $expected)"),
+        )
+        self.assertIn("compatible_client", codex_runtime)
+        self.assertIn(".codex-primary-runtime.new-", codex_runtime)
+        self.assertLess(
+            codex_runtime.index("$newerClientDetected ="),
+            codex_runtime.index("if ($existingVersion -and $existingVersion -ge $expectedVersion)"),
+        )
+        self.assertIn("runtime_stage", codex_macos)
+        self.assertIn("newer", codex_macos.lower())
+        self.assertLess(
+            codex_macos.index('if version_greater "$installed_client_version"'),
+            codex_macos.index('elif [[ -n "$installed_runtime" ]'),
+        )
+
+        claude_windows = windows_scripts[0].read_text(encoding="utf-8-sig")
+        self.assertIn("Get-InstalledGitVersion", claude_windows)
+        self.assertIn("requiredGitVersion", claude_windows)
+
 
 if __name__ == "__main__":
     unittest.main()

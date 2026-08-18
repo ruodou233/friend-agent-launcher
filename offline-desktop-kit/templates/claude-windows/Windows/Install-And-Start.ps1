@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 $PackageDir = Split-Path -Parent $PSScriptRoot
 $Assets = Join-Path $PackageDir 'assets'
@@ -13,34 +13,39 @@ if (-not (Test-Path -LiteralPath $ManifestPath)) {
 
 $manifest = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
 
-function Get-DesktopUserProfile {
-  $profilePath = $env:USERPROFILE
-  $script:DesktopAccount = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+function Get-InteractiveDesktopContext {
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $serviceSids = @('S-1-5-18', 'S-1-5-19', 'S-1-5-20')
+  if ($serviceSids -contains $identity.User.Value) {
+    throw "安装器不能以系统服务账户 $($identity.Name) 运行。请让 Agent 在当前桌面用户会话中运行。"
+  }
+  $sessionId = (Get-Process -Id $PID -ErrorAction Stop).SessionId
+  if ($sessionId -le 0) { throw '未检测到交互式 Windows 用户会话。' }
+  $explorer = Get-Process -Name explorer -ErrorAction SilentlyContinue |
+    Where-Object { $_.SessionId -eq $sessionId } | Select-Object -First 1
+  if (-not $explorer) { throw '当前会话中没有 Windows 桌面（explorer.exe），无法安全确定安装账户。' }
   try {
-    $explorer = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" |
-      Sort-Object CreationDate | Select-Object -First 1
-    if ($explorer) {
-      $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner
-      if ($owner.ReturnValue -eq 0 -and $owner.User) {
-        $script:DesktopAccount = "$($owner.Domain)\$($owner.User)"
-        $account = New-Object Security.Principal.NTAccount($owner.Domain, $owner.User)
-        $sid = $account.Translate([Security.Principal.SecurityIdentifier]).Value
-        $desktopProfile = Get-CimInstance Win32_UserProfile -Filter "SID='$sid'"
-        if ($desktopProfile.LocalPath) { $profilePath = $desktopProfile.LocalPath }
-      }
+    $desktopProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $($explorer.Id)" -ErrorAction Stop
+    $owner = Invoke-CimMethod -InputObject $desktopProcess -MethodName GetOwner -ErrorAction Stop
+    if ($owner.ReturnValue -ne 0 -or -not $owner.User) { throw '无法读取 explorer.exe 的所有者。' }
+    $desktopAccount = New-Object Security.Principal.NTAccount($owner.Domain, $owner.User)
+    $desktopSid = $desktopAccount.Translate([Security.Principal.SecurityIdentifier])
+    if ($desktopSid.Value -ne $identity.User.Value) {
+      throw "安装进程运行为 $($identity.Name)，但当前桌面属于 $($desktopAccount.Value)。"
+    }
+    $desktopProfile = Get-CimInstance Win32_UserProfile -Filter "SID='$($desktopSid.Value)'" -ErrorAction Stop |
+      Select-Object -First 1
+    if (-not $desktopProfile.LocalPath -or -not (Test-Path -LiteralPath $desktopProfile.LocalPath)) {
+      throw '无法确定当前桌面用户的主目录。'
     }
   } catch {
-    Write-Warning "无法查询桌面用户，将使用当前用户目录：$($_.Exception.Message)"
+    throw "无法确认当前桌面账户，已停止安装：$($_.Exception.Message)"
   }
-  if (-not (Test-Path -LiteralPath $profilePath)) { throw '无法确定已登录用户的主目录。' }
-  return $profilePath
+  return [pscustomobject]@{ Account = $desktopAccount.Value; Profile = $desktopProfile.LocalPath }
 }
 
-$DesktopProfile = Get-DesktopUserProfile
-$CurrentAccount = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-if ($CurrentAccount -ine $DesktopAccount) {
-  throw "安装进程当前运行为 $CurrentAccount，但桌面用户是 $DesktopAccount。请让 Agent 在桌面用户会话中运行本脚本，不要用 SYSTEM 或另一个管理员账户。"
-}
+$DesktopContext = Get-InteractiveDesktopContext
+$DesktopProfile = $DesktopContext.Profile
 $RoamingAppData = Join-Path $DesktopProfile 'AppData\Roaming'
 $LocalAppData = Join-Path $DesktopProfile 'AppData\Local'
 $StateDir = Join-Path $LocalAppData 'FriendDesktopAgentKit'
@@ -105,10 +110,25 @@ Write-Host '正在安装微软 WebView2 离线运行时…'
 $webViewProcess = Start-Process -FilePath $webViewInstaller -ArgumentList @('/silent', '/install') -PassThru -Wait
 if ($webViewProcess.ExitCode -ne 0) { throw "WebView2 安装失败：$($webViewProcess.ExitCode)" }
 
-if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
+function Get-InstalledGitVersion {
+  $gitCommand = Get-Command git.exe -ErrorAction SilentlyContinue
+  if (-not $gitCommand) { return $null }
+  try {
+    $versionText = & $gitCommand.Source --version 2>$null
+    if ($versionText -match '(\d+\.\d+\.\d+)') { return [version]$matches[1] }
+  } catch {}
+  return $null
+}
+
+$requiredGitParts = ([string]$manifest.git_for_windows.version).Split('.')
+$requiredGitVersion = [version](($requiredGitParts[0..2]) -join '.')
+$installedGitVersion = Get-InstalledGitVersion
+if (-not $installedGitVersion -or $installedGitVersion -lt $requiredGitVersion) {
   Write-Host '正在安装 Git for Windows…'
   $gitProcess = Start-Process -FilePath $gitInstaller -ArgumentList @('/VERYSILENT', '/NORESTART', '/CURRENTUSER', '/SP-') -PassThru -Wait
   if ($gitProcess.ExitCode -ne 0) { throw "Git for Windows 安装失败：$($gitProcess.ExitCode)" }
+} else {
+  Write-Host "Git for Windows $installedGitVersion 已满足最低版本 $requiredGitVersion。"
 }
 
 Write-Host '正在安装官方 Claude Desktop…'
