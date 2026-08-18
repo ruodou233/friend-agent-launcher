@@ -4,6 +4,12 @@
 
 作者：ruodou233、shing19。
 
+## 离线桌面素材包源码
+
+[`offline-desktop-kit/`](offline-desktop-kit/) 开源了朋友现场安装方案的五个源码模板/本地构建单元：Claude Windows/macOS、Codex macOS、Codex Windows Base 和 Runtime。它面向真正的官方桌面客户端，并把 CC Switch 作为 Provider 配置工具；这是参考模板，不是已通过公开 Release 门禁的预构建产物。
+
+公开仓库只发布安装脚本、manifest 模板和无密钥构建器；官方客户端、CC Switch、Runtime 与最终 ZIP 仍需用户从各自官方渠道取得并在仓库外组装。这不改变 `release-support.json` 对本仓公开预构建 Release 的阻断状态。
+
 ## 当前状态
 
 - **Claude macOS**：公开 `candidate` 只允许在 macOS 上生成本地 CI/现场验证包；公开启动器流程使用前必须已经安装官方 Claude Desktop。当前不宣称“下载即安装”“一键可用”或朋友可直接使用。

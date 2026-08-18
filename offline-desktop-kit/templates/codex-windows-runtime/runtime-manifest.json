@@ -1,0 +1,9 @@
+{
+  "package_version": "2026-08-09-clean.2",
+  "platform": "windows-x64",
+  "runtime_version": "26.802.11031",
+  "sha256": "3a3ac46039c35b5f33cfe94789c8b4ce3208e88ab14f5aaa675444f2a1b1b767",
+  "contains_real_keys": false,
+  "contains_token_options": false,
+  "contains_agent_prompt": false
+}

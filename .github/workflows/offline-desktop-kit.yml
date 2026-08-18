@@ -1,0 +1,30 @@
+name: Offline Desktop Kit
+
+on:
+  push:
+    paths:
+      - "offline-desktop-kit/**"
+      - "tests/test_offline_desktop_kit.py"
+      - ".github/workflows/offline-desktop-kit.yml"
+  pull_request:
+    paths:
+      - "offline-desktop-kit/**"
+      - "tests/test_offline_desktop_kit.py"
+      - ".github/workflows/offline-desktop-kit.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run offline kit tests
+        run: python -m unittest tests.test_offline_desktop_kit
