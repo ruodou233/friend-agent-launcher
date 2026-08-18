@@ -198,7 +198,9 @@ class OfflineDesktopKitTests(unittest.TestCase):
 
         codex_windows = windows_scripts[1].read_text(encoding="utf-8-sig")
         codex_runtime = windows_scripts[2].read_text(encoding="utf-8-sig")
-        codex_macos = (MODULE.TEMPLATES / "codex-macos/macOS/Install-And-Start.command").read_text()
+        codex_macos = (MODULE.TEMPLATES / "codex-macos/macOS/Install-And-Start.command").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("NewerClientDetected", codex_windows)
         self.assertIn(".codex-primary-runtime.new-", codex_windows)
         self.assertLess(
