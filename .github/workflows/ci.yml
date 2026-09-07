@@ -80,7 +80,7 @@ jobs:
           rg --version
       - name: Run release gate tests
         shell: bash
-        run: python tests/test_release_gate.py
+        run: python -m unittest tests.test_release_gate tests.test_build_private_claude_kit
       - name: Scan source, Git history, and artifact paths
         shell: bash
         run: bash scripts/scan-secrets.sh

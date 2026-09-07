@@ -24,6 +24,7 @@ PROFILE_ID = "friend-private-candidate-v1"
 OWNER = "friend-agent-private-kit"
 PRODUCT = "claude"
 INSTALLER_NAMES = {"macos": "Claude.dmg", "windows": "Claude.msix"}
+PROFILE_SENTINEL = "__RUNTIME_KEY__"
 
 
 class BuildError(Exception):
@@ -179,6 +180,13 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def parse_sha256(raw: str, label: str) -> str:
+    require_text(label, raw)
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", raw):
+        raise BuildError(f"{label} must be 64 hexadecimal characters")
+    return raw.lower()
+
+
 def render(template: str, values: dict[str, str]) -> str:
     result = textwrap.dedent(template).lstrip()
     for key, value in values.items():
@@ -189,9 +197,13 @@ def render(template: str, values: dict[str, str]) -> str:
 MAC_INSTALL = r'''#!/bin/bash
 set -euo pipefail
 umask 077
+export LC_ALL=C
 
 OWNER='__OWNER__'
 PROFILE_ID='__PROFILE_ID__'
+DEPLOYMENT_UUID='__DEPLOYMENT_UUID__'
+KEY_MODE='__KEY_MODE__'
+INSTALLER_SHA='__INSTALLER_SHA__'
 PROFILE_SHA='__PROFILE_SHA__'
 META_SHA='__META_SHA__'
 MANIFEST_SHA='__MANIFEST_SHA__'
@@ -253,6 +265,7 @@ trap cleanup EXIT
 [[ "$(uname -s)" == "Darwin" ]] || fail "macOS is required"
 if pgrep -x Claude >/dev/null 2>&1; then fail "Claude is running"; fi
 [[ -f "$DMG" && ! -L "$DMG" ]] || fail "official installer is missing"
+[[ "$(hash_file "$DMG")" == "$INSTALLER_SHA" ]] || fail "official installer sha256 mismatch"
 for policy in \
   "/Library/Managed Preferences/com.anthropic.Claude.plist" \
   "$HOME/Library/Managed Preferences/com.anthropic.Claude.plist"; do
@@ -275,7 +288,22 @@ mkdir -p "$CONFIG"
 check_not_symlink "$CONFIG_PARENT" "configLibrary parent"
 [[ -d "$CONFIG" && ! -L "$CONFIG" ]] || fail "configLibrary could not be created"
 PROFILE_TMP="$(mktemp "$CONFIG/.friend-private-profile.XXXXXX")"
-printf '%s' "$PROFILE_B64" | base64 -D > "$PROFILE_TMP"
+if [[ "$KEY_MODE" == "prompt" ]]; then
+  printf 'Paste your gateway Key (input is hidden): ' >&2
+  IFS= read -r -s API_KEY
+  printf '\n' >&2
+  [[ "${#API_KEY}" -ge 16 && "${#API_KEY}" -le 512 ]] || fail "Key must be 16-512 ASCII letters, digits, dot, underscore, or hyphen"
+  [[ "$API_KEY" =~ ^[A-Za-z0-9._-]+$ ]] || fail "Key must be 16-512 ASCII letters, digits, dot, underscore, or hyphen"
+  PROFILE_TEXT="$(printf '%s' "$PROFILE_B64" | base64 -D)"
+  [[ "$PROFILE_TEXT" == *'__RUNTIME_KEY__'* ]] || fail "profile template is invalid"
+  PROFILE_TEXT="${PROFILE_TEXT/__RUNTIME_KEY__/$API_KEY}"
+  API_KEY=''
+  printf '%s' "$PROFILE_TEXT" > "$PROFILE_TMP"
+  PROFILE_TEXT=''
+  PROFILE_SHA="$(hash_file "$PROFILE_TMP")"
+else
+  printf '%s' "$PROFILE_B64" | base64 -D > "$PROFILE_TMP"
+fi
 chmod 600 "$PROFILE_TMP"
 META_TMP="$(mktemp "$CONFIG/.friend-private-meta.XXXXXX")"
 printf '%s' "$META_B64" | base64 -D > "$META_TMP"
@@ -294,7 +322,13 @@ mkdir -p "$MANIFEST_DIR"
 check_not_symlink "$MANIFEST_DIR" "manifest directory"
 [[ -d "$MANIFEST_DIR" ]] || fail "manifest directory could not be created"
 MANIFEST_TMP="$(mktemp "$MANIFEST_DIR/.private-claude-manifest.XXXXXX")"
-printf '%s' "$MANIFEST_B64" | base64 -D > "$MANIFEST_TMP"
+if [[ "$KEY_MODE" == "prompt" ]]; then
+  printf '{"owner":"%s","generation_id":"%s","deployment_uuid":"%s","profile_sha256":"%s","meta_sha256":"%s"}' \
+    "$OWNER" "$PROFILE_ID" "$DEPLOYMENT_UUID" "$PROFILE_SHA" "$META_SHA" > "$MANIFEST_TMP"
+  MANIFEST_SHA="$(hash_file "$MANIFEST_TMP")"
+else
+  printf '%s' "$MANIFEST_B64" | base64 -D > "$MANIFEST_TMP"
+fi
 chmod 600 "$MANIFEST_TMP"
 sync
 mv "$MANIFEST_TMP" "$MANIFEST"
@@ -335,6 +369,11 @@ else
   APP="$HOME/Applications/Claude.app"
 fi
 [[ -d "$APP" && ! -L "$APP" ]] || fail "Claude.app is not a real directory"
+codesign --verify --deep --strict "$APP" >/dev/null 2>&1 || fail "Claude.app code signature verification failed"
+spctl --assess --type execute "$APP" >/dev/null 2>&1 || fail "Claude.app Gatekeeper assessment failed"
+SIGNATURE_DETAILS="$(codesign -dv --verbose=4 "$APP" 2>&1)" || fail "Claude.app identity inspection failed"
+TEAM_ID="$(printf '%s\n' "$SIGNATURE_DETAILS" | sed -n 's/^TeamIdentifier=//p' | tail -n 1)"
+[[ "$TEAM_ID" == "Q6L2SF6YDW" ]] || fail "Claude.app TeamIdentifier mismatch"
 open "$APP"
 INSTALL_SUCCEEDED=1
 echo "Friend Claude installed."
@@ -344,9 +383,13 @@ echo "Friend Claude installed."
 MAC_RESTORE = r'''#!/bin/bash
 set -euo pipefail
 umask 077
+export LC_ALL=C
 
 OWNER='__OWNER__'
 PROFILE_ID='__PROFILE_ID__'
+PRODUCT='__PRODUCT__'
+DEPLOYMENT_UUID='__DEPLOYMENT_UUID__'
+KEY_MODE='__KEY_MODE__'
 PROFILE_SHA='__PROFILE_SHA__'
 META_SHA='__META_SHA__'
 MANIFEST_SHA='__MANIFEST_SHA__'
@@ -360,6 +403,12 @@ MANIFEST="$MANIFEST_PARENT/private-claude-manifest-v1.json"
 fail() { echo "Restore failed: $1" >&2; exit 1; }
 check_not_symlink() { [[ ! -L "$1" ]] || fail "$2 must not be a symlink"; }
 hash_file() { shasum -a 256 "$1" | awk '{print $1}'; }
+read_json_field() {
+  local key_path="$1" file="$2" label="$3" value
+  value="$(plutil -extract "$key_path" raw -o - "$file" 2>/dev/null)" || fail "$label is missing or invalid"
+  [[ -n "$value" ]] || fail "$label is missing or invalid"
+  printf '%s' "$value"
+}
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "macOS is required"
 if pgrep -x Claude >/dev/null 2>&1; then fail "Claude is running"; fi
@@ -370,17 +419,48 @@ check_not_symlink "$META" "metadata"
 check_not_symlink "$MANIFEST_PARENT" "manifest parent"
 check_not_symlink "$MANIFEST" "manifest"
 [[ -f "$MANIFEST" ]] || fail "owned manifest is missing"
-[[ "$(hash_file "$MANIFEST")" == "$MANIFEST_SHA" ]] || fail "manifest ownership hash mismatch"
-manifest_owner="$(sed -n 's/.*"owner":"\([^"]*\)".*/\1/p' "$MANIFEST")"
-manifest_profile_hash="$(sed -n 's/.*"profile_sha256":"\([0-9a-f]\{64\}\)".*/\1/p' "$MANIFEST")"
-manifest_meta_hash="$(sed -n 's/.*"meta_sha256":"\([0-9a-f]\{64\}\)".*/\1/p' "$MANIFEST")"
+if [[ "$KEY_MODE" == "embedded" ]]; then
+  [[ "$(hash_file "$MANIFEST")" == "$MANIFEST_SHA" ]] || fail "manifest ownership hash mismatch"
+fi
+manifest_owner="$(read_json_field "owner" "$MANIFEST" "manifest owner")"
+manifest_generation="$(read_json_field "generation_id" "$MANIFEST" "manifest generation")"
+manifest_deployment="$(read_json_field "deployment_uuid" "$MANIFEST" "manifest deployment")"
+manifest_profile_hash="$(read_json_field "profile_sha256" "$MANIFEST" "manifest profile hash")"
+manifest_meta_hash="$(read_json_field "meta_sha256" "$MANIFEST" "manifest metadata hash")"
 [[ "$manifest_owner" == "$OWNER" ]] || fail "manifest owner mismatch"
-[[ "$manifest_profile_hash" == "$PROFILE_SHA" ]] || fail "profile ownership hash mismatch"
-[[ "$manifest_meta_hash" == "$META_SHA" ]] || fail "metadata ownership hash mismatch"
+[[ "$manifest_generation" == "$PROFILE_ID" ]] || fail "manifest generation mismatch"
+[[ "$manifest_deployment" == "$DEPLOYMENT_UUID" ]] || fail "manifest deployment mismatch"
+[[ "$manifest_profile_hash" =~ ^[0-9a-f]{64}$ ]] || fail "profile ownership hash is invalid"
+[[ "$manifest_meta_hash" =~ ^[0-9a-f]{64}$ ]] || fail "metadata ownership hash is invalid"
+if [[ "$KEY_MODE" == "prompt" ]]; then
+  [[ "$manifest_meta_hash" == "$META_SHA" ]] || fail "metadata ownership hash mismatch"
+  PROFILE_SHA="$manifest_profile_hash"
+else
+  [[ "$manifest_profile_hash" == "$PROFILE_SHA" ]] || fail "profile ownership hash mismatch"
+  [[ "$manifest_meta_hash" == "$META_SHA" ]] || fail "metadata ownership hash mismatch"
+fi
 [[ -f "$PROFILE" && ! -L "$PROFILE" ]] || fail "owned profile is missing"
 [[ -f "$META" && ! -L "$META" ]] || fail "owned metadata is missing"
 [[ "$(hash_file "$PROFILE")" == "$manifest_profile_hash" ]] || fail "profile was modified"
 [[ "$(hash_file "$META")" == "$manifest_meta_hash" ]] || fail "metadata was modified"
+profile_owner="$(read_json_field "friend.owner" "$PROFILE" "profile friend.owner")"
+profile_product="$(read_json_field "friend.product" "$PROFILE" "profile friend.product")"
+profile_generation="$(read_json_field "friend.generation_id" "$PROFILE" "profile friend.generation_id")"
+profile_deployment="$(read_json_field "deploymentOrganizationUuid" "$PROFILE" "profile deploymentOrganizationUuid")"
+meta_applied_id="$(read_json_field "appliedId" "$META" "metadata appliedId")"
+meta_entry_id="$(read_json_field "entries.0.id" "$META" "metadata first entry id")"
+meta_entry_owner="$(read_json_field "entries.0.friend_owner" "$META" "metadata first entry friend_owner")"
+meta_entry_generation="$(read_json_field "entries.0.friend_generation_id" "$META" "metadata first entry friend_generation_id")"
+meta_entry_product="$(read_json_field "entries.0.product" "$META" "metadata first entry product")"
+[[ "$profile_owner" == "$OWNER" ]] || fail "profile owner mismatch"
+[[ "$profile_product" == "$PRODUCT" ]] || fail "profile product mismatch"
+[[ "$profile_generation" == "$PROFILE_ID" ]] || fail "profile generation mismatch"
+[[ "$profile_deployment" == "$DEPLOYMENT_UUID" ]] || fail "profile deployment mismatch"
+[[ "$meta_applied_id" == "$PROFILE_ID" ]] || fail "metadata appliedId mismatch"
+[[ "$meta_entry_id" == "$PROFILE_ID" ]] || fail "metadata entry id mismatch"
+[[ "$meta_entry_owner" == "$OWNER" ]] || fail "metadata entry owner mismatch"
+[[ "$meta_entry_generation" == "$PROFILE_ID" ]] || fail "metadata entry generation mismatch"
+[[ "$meta_entry_product" == "$PRODUCT" ]] || fail "metadata entry product mismatch"
 rm -f -- "$PROFILE" "$META" "$MANIFEST"
 if [[ -d "$CONFIG" && ! -L "$CONFIG" ]]; then
   [[ -z "$(find "$CONFIG" -mindepth 1 -print -quit)" ]] && rmdir "$CONFIG"
@@ -393,6 +473,9 @@ WINDOWS_INSTALL = r'''$ErrorActionPreference = 'Stop'
 
 $OWNER = '__OWNER__'
 $PROFILE_ID = '__PROFILE_ID__'
+$DEPLOYMENT_UUID = '__DEPLOYMENT_UUID__'
+$KEY_MODE = '__KEY_MODE__'
+$INSTALLER_SHA = '__INSTALLER_SHA__'
 $PROFILE_SHA = '__PROFILE_SHA__'
 $META_SHA = '__META_SHA__'
 $MANIFEST_SHA = '__MANIFEST_SHA__'
@@ -481,6 +564,13 @@ try {
     Assert-NotReparse $Installer 'official installer'
     $installerItem = Get-Existing $Installer
     if ($null -eq $installerItem -or $installerItem.PSIsContainer) { throw 'Official installer is missing.' }
+    if ((Get-Sha256 $Installer) -cne $INSTALLER_SHA) { throw 'Official installer SHA-256 mismatch.' }
+    $signature = Get-AuthenticodeSignature -FilePath $Installer
+    if ($null -eq $signature) { throw 'Official installer signature is unavailable.' }
+    if ($signature.Status -ne 'Valid') { throw 'Official installer signature is not Valid.' }
+    if ($null -eq $signature.SignerCertificate) { throw 'Official installer signer certificate is missing.' }
+    $signerSubject = [string]$signature.SignerCertificate.Subject
+    if ($signerSubject -notlike '*Anthropic, PBC*') { throw 'Official installer signer is not Anthropic, PBC.' }
     Assert-NotReparse $ConfigParent 'configLibrary parent'
     Assert-NotReparse $ConfigLibrary 'configLibrary'
     Assert-NotReparse $Profile 'profile'
@@ -499,9 +589,26 @@ try {
     Ensure-Directory $ConfigParent 'configLibrary parent'
     Ensure-Directory $ConfigLibrary 'configLibrary'
     $ProfileText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($PROFILE_B64))
+    if ($KEY_MODE -eq 'prompt') {
+        $SecureKey = Read-Host 'Paste your gateway Key (input is hidden)' -AsSecureString
+        $Bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureKey)
+        try { $ApiKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($Bstr) }
+        finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Bstr) }
+        if ($ApiKey -notmatch '\A[A-Za-z0-9._-]{16,512}\z') {
+            throw 'Key must be 16-512 ASCII letters, digits, dot, underscore, or hyphen.'
+        }
+        if ([regex]::Matches($ProfileText, '__RUNTIME_KEY__').Count -ne 1) {
+            throw 'Profile template is invalid.'
+        }
+        $ProfileText = $ProfileText.Replace('__RUNTIME_KEY__', $ApiKey)
+        $ApiKey = $null
+        $SecureKey = $null
+    }
     $MetaText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($META_B64))
     $ProfileTmp = New-RandomSibling $Profile
     Write-Utf8NoBomFlush $ProfileTmp $ProfileText
+    if ($KEY_MODE -eq 'prompt') { $PROFILE_SHA = Get-Sha256 $ProfileTmp }
+    $ProfileText = $null
     Move-Item -LiteralPath $ProfileTmp -Destination $Profile -ErrorAction Stop
     $ProfileTmp = $null
     $ProfileCreated = $true
@@ -515,9 +622,20 @@ try {
 
     Ensure-Directory $ManifestParent 'manifest directory'
     Assert-Absent $Manifest 'manifest'
-    $ManifestText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($MANIFEST_B64))
+    if ($KEY_MODE -eq 'prompt') {
+        $ManifestText = [ordered]@{
+            owner = $OWNER
+            generation_id = $PROFILE_ID
+            deployment_uuid = $DEPLOYMENT_UUID
+            profile_sha256 = $PROFILE_SHA
+            meta_sha256 = $META_SHA
+        } | ConvertTo-Json -Compress
+    } else {
+        $ManifestText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($MANIFEST_B64))
+    }
     $ManifestTmp = New-RandomSibling $Manifest
     Write-Utf8NoBomFlush $ManifestTmp $ManifestText
+    if ($KEY_MODE -eq 'prompt') { $MANIFEST_SHA = Get-Sha256 $ManifestTmp }
     Move-Item -LiteralPath $ManifestTmp -Destination $Manifest -ErrorAction Stop
     $ManifestTmp = $null
     $ManifestCreated = $true
@@ -543,6 +661,9 @@ WINDOWS_RESTORE = r'''$ErrorActionPreference = 'Stop'
 
 $OWNER = '__OWNER__'
 $PROFILE_ID = '__PROFILE_ID__'
+$PRODUCT = '__PRODUCT__'
+$DEPLOYMENT_UUID = '__DEPLOYMENT_UUID__'
+$KEY_MODE = '__KEY_MODE__'
 $PROFILE_SHA = '__PROFILE_SHA__'
 $META_SHA = '__META_SHA__'
 $MANIFEST_SHA = '__MANIFEST_SHA__'
@@ -580,10 +701,18 @@ try {
     Assert-NotReparse $Manifest 'manifest'
     $manifestItem = Get-Existing $Manifest
     if ($null -eq $manifestItem -or $manifestItem.PSIsContainer) { throw 'Owned manifest is missing.' }
-    if ((Get-Sha256 $Manifest) -ne $MANIFEST_SHA) { throw 'Manifest ownership hash mismatch.' }
+    if ($KEY_MODE -eq 'embedded' -and (Get-Sha256 $Manifest) -ne $MANIFEST_SHA) {
+        throw 'Manifest ownership hash mismatch.'
+    }
     $manifestObject = [IO.File]::ReadAllText($Manifest) | ConvertFrom-Json
     if ($null -eq $manifestObject -or $manifestObject.owner -ne $OWNER) { throw 'Manifest owner mismatch.' }
-    if ($manifestObject.profile_sha256 -ne $PROFILE_SHA -or $manifestObject.meta_sha256 -ne $META_SHA) {
+    if ($manifestObject.generation_id -ne $PROFILE_ID) { throw 'Manifest generation mismatch.' }
+    if ($manifestObject.deployment_uuid -ne $DEPLOYMENT_UUID) { throw 'Manifest deployment mismatch.' }
+    if ($KEY_MODE -eq 'prompt') {
+        if ($manifestObject.profile_sha256 -notmatch '\A[0-9a-f]{64}\z') { throw 'Profile ownership hash is invalid.' }
+        if ($manifestObject.meta_sha256 -ne $META_SHA) { throw 'Metadata ownership hash mismatch.' }
+        $PROFILE_SHA = $manifestObject.profile_sha256
+    } elseif ($manifestObject.profile_sha256 -ne $PROFILE_SHA -or $manifestObject.meta_sha256 -ne $META_SHA) {
         throw 'Manifest ownership hashes mismatch.'
     }
     $profileItem = Get-Existing $Profile
@@ -594,6 +723,23 @@ try {
     if ((Get-Sha256 $Profile) -ne $PROFILE_SHA -or (Get-Sha256 $Meta) -ne $META_SHA) {
         throw 'Owned profile or metadata was modified.'
     }
+    $profileObject = [IO.File]::ReadAllText($Profile) | ConvertFrom-Json
+    if ($null -eq $profileObject) { throw 'Owned profile JSON is invalid.' }
+    if ($null -eq $profileObject.friend) { throw 'Owned profile friend identity is missing.' }
+    if ($profileObject.friend.owner -ne $OWNER) { throw 'Profile owner mismatch.' }
+    if ($profileObject.friend.product -ne $PRODUCT) { throw 'Profile product mismatch.' }
+    if ($profileObject.friend.generation_id -ne $PROFILE_ID) { throw 'Profile generation mismatch.' }
+    if ($profileObject.deploymentOrganizationUuid -ne $DEPLOYMENT_UUID) { throw 'Profile deployment mismatch.' }
+    $metaObject = [IO.File]::ReadAllText($Meta) | ConvertFrom-Json
+    if ($null -eq $metaObject) { throw 'Owned metadata JSON is invalid.' }
+    $metaEntries = @($metaObject.entries)
+    if ($metaEntries.Count -lt 1 -or $null -eq $metaEntries[0]) { throw 'Owned metadata first entry is missing.' }
+    $metaEntry = $metaEntries[0]
+    if ($metaObject.appliedId -ne $PROFILE_ID) { throw 'Metadata appliedId mismatch.' }
+    if ($metaEntry.id -ne $PROFILE_ID) { throw 'Metadata entry id mismatch.' }
+    if ($metaEntry.friend_owner -ne $OWNER) { throw 'Metadata entry owner mismatch.' }
+    if ($metaEntry.friend_generation_id -ne $PROFILE_ID) { throw 'Metadata entry generation mismatch.' }
+    if ($metaEntry.product -ne $PRODUCT) { throw 'Metadata entry product mismatch.' }
     Remove-Item -LiteralPath $Profile, $Meta, $Manifest -Force
     $configItem = Get-Existing $ConfigLibrary
     if ($null -ne $configItem) {
@@ -630,9 +776,9 @@ exit /b %EXIT_CODE%
 def build(args: argparse.Namespace) -> tuple[Path, str]:
     platform = args.platform
     installer = input_file(args.installer, "installer")
-    key_file = input_file(args.key_file, "key-file")
     output_dir = output_directory(args.output_dir)
-    key = read_key(key_file)
+    key_mode = "prompt" if args.prompt_for_key else "embedded"
+    profile_value = PROFILE_SENTINEL if args.prompt_for_key else read_key(input_file(args.key_file, "key-file"))
     gateway = parse_gateway(args.gateway_url)
     require_text("quota-label", args.quota_label)
     require_text("validation-status", args.validation_status)
@@ -654,8 +800,9 @@ def build(args: argparse.Namespace) -> tuple[Path, str]:
         raise BuildError("installer must be readable") from exc
     if len(installer_bytes) < 1024 * 1024 and not args.allow_small_test_installer:
         raise BuildError("installer must be at least 1 MiB unless --allow-small-test-installer is set")
+    installer_sha = parse_sha256(args.installer_sha256, "installer-sha256")
     installer_hash = sha256(installer_bytes)
-    if installer_hash != args.installer_sha256.lower():
+    if installer_hash != installer_sha:
         raise BuildError("installer sha256 does not match")
     installer_url = args.installer_url
     validate_installer_url(installer_url, platform, installer.name)
@@ -669,7 +816,7 @@ def build(args: argparse.Namespace) -> tuple[Path, str]:
         "inferenceProvider": "gateway",
         "inferenceCredentialKind": "static",
         "inferenceGatewayBaseUrl": gateway,
-        "inferenceGatewayApiKey": key,
+        "inferenceGatewayApiKey": profile_value,
         "inferenceGatewayAuthScheme": "bearer",
         "inferenceModels": [{"name": model} for model in models],
         "disableDeploymentModeChooser": True,
@@ -687,18 +834,31 @@ def build(args: argparse.Namespace) -> tuple[Path, str]:
     }
     profile_data = json_bytes(profile)
     metadata_data = json_bytes(metadata)
-    manifest = {
-        "owner": OWNER,
-        "profile_sha256": sha256(profile_data),
-        "meta_sha256": sha256(metadata_data),
-    }
-    manifest_data = json_bytes(manifest)
+    if args.prompt_for_key:
+        manifest_data = b""
+        profile_sha = ""
+        manifest_sha = ""
+    else:
+        manifest = {
+            "owner": OWNER,
+            "generation_id": PROFILE_ID,
+            "deployment_uuid": deployment_uuid,
+            "profile_sha256": sha256(profile_data),
+            "meta_sha256": sha256(metadata_data),
+        }
+        manifest_data = json_bytes(manifest)
+        profile_sha = sha256(profile_data)
+        manifest_sha = sha256(manifest_data)
     values = {
         "OWNER": OWNER,
         "PROFILE_ID": PROFILE_ID,
-        "PROFILE_SHA": sha256(profile_data),
+        "PRODUCT": PRODUCT,
+        "DEPLOYMENT_UUID": deployment_uuid,
+        "KEY_MODE": key_mode,
+        "INSTALLER_SHA": installer_sha,
+        "PROFILE_SHA": profile_sha,
         "META_SHA": sha256(metadata_data),
-        "MANIFEST_SHA": sha256(manifest_data),
+        "MANIFEST_SHA": manifest_sha,
         "PROFILE_B64": b64(profile_data),
         "META_B64": b64(metadata_data),
         "MANIFEST_B64": b64(manifest_data),
@@ -728,11 +888,17 @@ def build(args: argparse.Namespace) -> tuple[Path, str]:
         )
     else:
         platform_readme = "macOS：退出 Claude 后运行 Install.command；测试结束并退出 Claude 后运行 Restore.command。"
+    credential_readme = (
+        "本包不包含任何 Key。双击安装入口后会在本机提示输入一次（输入不回显）；Key 随后写入当前用户的 Claude-3p 配置，同一系统用户可以读取。请勿截图、上传或转发自己的 Key。"
+        if args.prompt_for_key else
+        "配置中的 Key 可被本机用户提取，请勿把它当作不可导出的凭据。"
+    )
+    sharing_readme = "本包可以分享，但每位使用者应输入自己的 Key。" if args.prompt_for_key else "请勿把本包或其中的 Key 上传到公开平台。"
     readme = textwrap.dedent(f"""\
         Friend Claude {platform} {version} candidate
 
         这是一个非官方配置包，不代表 Anthropic 或 Claude 官方发行物。它使用原版 Claude Desktop 界面，
-        但请求会经过构建时指定的第三方 HTTPS 网关。配置中的 Key 可被本机用户提取，请勿把它当作不可导出的凭据。
+        但请求会经过构建时指定的第三方 HTTPS 网关。{credential_readme}
 
         测试信息
         - 额度标签：{args.quota_label}
@@ -742,9 +908,10 @@ def build(args: argparse.Namespace) -> tuple[Path, str]:
         - 模型：{", ".join(models)}
 
         仅适合没有既有 Claude-3p configLibrary 配置的测试机。安装程序发现既有配置、策略、符号链接或 Claude 正在运行时会拒绝执行，
-        不会合并或备份现有配置，也不会碰现有对话。Restore 只移除本包配置；只在三个目标文件与本包预期哈希均匹配时删除，若任一文件被修改则拒绝。
-        Restore 不卸载 Claude.app/AppX，也不删除测试会话。
-        请勿把本包或其中的 Key 上传到公开平台。
+        不会合并或备份现有配置，也不会碰现有对话。Restore 只移除本包配置；删除前会核对 manifest、profile/meta 身份和三个目标文件哈希，任一项不匹配就拒绝。
+        prompt 模式安装时生成的动态 manifest 是防误删边界，不抵抗同一 OS 用户主动同时篡改 profile/manifest。
+        安装失败只回滚配置；官方 Claude.app/AppX 安装可能已经完成并仍保留。Restore 不卸载 Claude.app/AppX，也不删除测试会话。
+        {sharing_readme}
 
         {platform_readme}
         {"Windows 真机状态由 validation-status 原样展示；安装成功后请从 Start menu 打开 Claude。" if platform == "windows" else "安装成功后会打开 Claude.app。"}
@@ -807,7 +974,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--installer", required=True)
     result.add_argument("--installer-url", required=True)
     result.add_argument("--installer-sha256", required=True)
-    result.add_argument("--key-file", required=True)
+    credential = result.add_mutually_exclusive_group(required=True)
+    credential.add_argument("--key-file")
+    credential.add_argument("--prompt-for-key", action="store_true")
     result.add_argument("--gateway-url", required=True)
     result.add_argument("--output-dir", required=True)
     result.add_argument("--models", nargs="+", required=True)
