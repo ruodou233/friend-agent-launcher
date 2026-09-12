@@ -15,7 +15,7 @@ Source templates for assembling offline desktop kits with official Claude/Codex 
 
 ## 旧启动器与网关实验
 
-下文的 Tauri companion/launcher、固定 Friend 网关、计费控制面及其 release matrix 属于早期实验，保留供参考。它们的候选状态和发布门禁不等同于上面的离线素材包方案；本次更新没有验证或上线这些服务。
+下文的 Tauri 非官方 companion/launcher、固定 Friend 网关、计费控制面及其 release matrix 属于早期实验，保留供参考。它们的候选状态和发布门禁不等同于上面的离线素材包方案；本次更新没有验证或上线这些服务。
 
 ## 当前状态
 
