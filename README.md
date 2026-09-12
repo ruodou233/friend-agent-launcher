@@ -1,4 +1,6 @@
-# Friend Agent Launcher
+# AI 桌面客户端启动器原型｜AI Desktop Launcher Prototype
+
+A desktop launcher prototype for testing custom AI gateway configuration, currently focused on local Claude Desktop validation on macOS.
 
 这是一个非官方 companion/launcher 的源码基础，用来验证“保留官方桌面 App，只写入受信 Friend 配置”的本地流程。它不包含、修改、注入、重签或重新分发 Claude Desktop、ChatGPT 或 Codex 官方 App，也不等于可以发给朋友的安装包。
 
