@@ -5,6 +5,7 @@
 ## 边界
 
 - `--installer`、`--output-dir`，以及使用内置 Key 模式时的 `--key-file` 必须在仓库外，仓库内路径会被拒绝。
+- 内置 Key 的 `--key-file` 模式要求 POSIX 构建主机，以执行输入文件和输出 ZIP 的 `0600` 权限约束；可在该主机生成 Windows 目标包。Windows 构建主机使用 `--prompt-for-key` 无 Key 模式，不把 Windows ACL 当成 Unix 权限位。
 - 凭据模式必须二选一：`--key-file` 生成内置 Key 的私下测试包；`--prompt-for-key` 生成不含 Key、安装时由用户本机无回显输入 Key 的可分享包。两者不能同时使用。
 - 安装器 URL 必须通过官方 HTTPS URL 规则，安装器体积小于 1 MiB 只有测试时可配合 `--allow-small-test-installer` 使用。
 - 内置 Key 的 ZIP 是私有候选包，不得提交或上传公开仓。ZIP 成员不保存 Key 明文，但安装脚本内的 Base64 profile 可由收到包的本机用户恢复，因此包本身仍需按敏感材料处理。`--prompt-for-key` 产物不含 Key，可以分享，但仍不应把官方安装器二进制提交到源码仓。
