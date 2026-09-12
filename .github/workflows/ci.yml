@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+# Keep generated test-fixture bytecode out of the source credential scan.
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
 jobs:
   test:
     strategy:
