@@ -1,0 +1,40 @@
+{
+  "package_version": "2026-09-10",
+  "author": "shing19",
+  "agent": "claude",
+  "platform": "windows-x64",
+  "architecture": "x64",
+  "distribution": "third-party-offline-bundle",
+  "desktop_gui": true,
+  "install_mode": "offline-bundled",
+  "foreign_network_required_for_install": false,
+  "contains_real_keys": false,
+  "official_client": {
+    "file": "official-client.msix",
+    "publisher_contains": "Anthropic, PBC",
+    "sha256": "dfc789cb60a88a5ba794c25903ebfc0f4552c650a157933b056c984366dbedca",
+    "version": "1.49585.0.0"
+  },
+  "claude_code_engine": {
+    "file": "claude-code-engine.exe",
+    "version": "2.1.260",
+    "marker": "664d2c6ca08afcd030100ddaddb80c5764bc517a4df407d819e6839bcc5edca8",
+    "sha256": "ab5fe6cb800a9faf3df1cc0f6bcb71f097296b302a16b576ca906446a22fea71"
+  },
+  "git_for_windows": {
+    "file": "Git-for-Windows.exe",
+    "version": "2.55.0.5",
+    "sha256": "d065a4e23c3d9a6b5073d609b5be0830227ec3ca053c083ba385061ddfaf94c6"
+  },
+  "webview2": {
+    "file": "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
+    "source": "https://go.microsoft.com/fwlink/?linkid=2124701",
+    "publisher_contains": "Microsoft Corporation",
+    "sha256": "e7fa35755196ad9223596ef021a1ce6799509142eaa40ba35f634026be50b831"
+  },
+  "cc_switch": {
+    "file": "CC-Switch.zip",
+    "version": "3.20.2",
+    "sha256": "6c27a5bef4f444bd8cf30eee5af16d3d4b4d4f0f71c10c142beeed034ecb2eab"
+  }
+}

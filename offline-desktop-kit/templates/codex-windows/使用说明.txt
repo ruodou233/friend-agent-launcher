@@ -1,0 +1,1 @@
+﻿两份 ZIP 解压成同一父目录下的两个并列文件夹，从 Friend-Codex-Windows-x64-Base 中双击 START-WINDOWS.cmd。

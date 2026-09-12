@@ -1,0 +1,14 @@
+{
+  "package_version": "2026-09-10",
+  "platform": "windows-x64",
+  "runtime_version": "26.905.11957",
+  "compatible_client": {
+    "identity_name": "OpenAI.Codex",
+    "max_version": "26.903.8094.0"
+  },
+  "sha256": "61c20d18c21d4c9659ade23fe521ee46a11e7819371b5f28976396c6733f2e0e",
+  "contains_real_keys": false,
+  "contains_token_options": false,
+  "contains_agent_prompt": false,
+  "webview2_sha256": "e7fa35755196ad9223596ef021a1ce6799509142eaa40ba35f634026be50b831"
+}

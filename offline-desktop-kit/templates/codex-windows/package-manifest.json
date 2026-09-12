@@ -1,0 +1,36 @@
+{
+  "package_version": "2026-09-10",
+  "author": "shing19",
+  "agent": "codex",
+  "platform": "windows-x64",
+  "architecture": "x64",
+  "desktop_gui": true,
+  "third_party_offline_bundle": true,
+  "official_client": {
+    "file": "assets/official-client.msix",
+    "package_version": "26.903.8094.0",
+    "publisher_match": "50BDFD77-8903-4850-9FFE-6E8522F64D5B",
+    "sha256": "f8a845dd58f177fbcd71b01c7831d742fc90855e4b207ee2d8ce3ab5f9bcc30f"
+  },
+  "cc_switch": {
+    "file": "assets/CC-Switch.zip",
+    "version": "3.20.2",
+    "sha256": "6c27a5bef4f444bd8cf30eee5af16d3d4b4d4f0f71c10c142beeed034ecb2eab"
+  },
+  "webview2_runtime": {
+    "file": "../Friend-Codex-Windows-Offline-Runtime/MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
+    "source": "https://go.microsoft.com/fwlink/?linkid=2124701",
+    "publisher_match": "Microsoft Corporation",
+    "sha256": "e7fa35755196ad9223596ef021a1ce6799509142eaa40ba35f634026be50b831"
+  },
+  "codex_primary_runtime": {
+    "sibling_package": "Friend-Codex-Windows-Offline-Runtime",
+    "version": "26.905.11957",
+    "required_for_full_offline_capability": true,
+    "sha256": "61c20d18c21d4c9659ade23fe521ee46a11e7819371b5f28976396c6733f2e0e"
+  },
+  "contains_real_keys": false,
+  "contains_token_options": false,
+  "contains_agent_prompt": false,
+  "foreign_network_required_for_install": false
+}

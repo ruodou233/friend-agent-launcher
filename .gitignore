@@ -10,3 +10,5 @@ src-tauri/icons/ios/
 .env.*
 !.env.example
 release/
+offline-desktop-kit/assets/
+offline-desktop-kit/out/
