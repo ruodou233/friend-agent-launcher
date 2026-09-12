@@ -45,6 +45,7 @@ def pin_test_manifest(templates, kit, assets):
         source = external_source(kit, assets, relative_path)
         set_nested(manifest, keys, MODULE.sha256_file(source))
     if kit == "codex-windows":
+        set_nested(manifest, ("webview2_runtime", "sha256"), MODULE.sha256_file(assets / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"))
         set_nested(
             manifest,
             ("codex_primary_runtime", "sha256"),
@@ -68,6 +69,7 @@ class OfflineDesktopKitTests(unittest.TestCase):
                 path.write_bytes(f"{kit}:{external_name}".encode())
         if kit == "codex-windows":
             (assets / "codex-primary-runtime.tar.gz").write_bytes(b"companion-runtime")
+            (assets / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe").write_bytes(b"companion-webview")
         return assets
 
     def test_all_kit_layouts_build_with_pinned_external_payloads(self):
@@ -92,7 +94,12 @@ class OfflineDesktopKitTests(unittest.TestCase):
                         archive_path = MODULE.build(kit, assets, output)
                         with zipfile.ZipFile(archive_path) as archive:
                             names = archive.namelist()
-                            self.assertTrue(any(name.endswith("SHA256SUMS.txt") for name in names))
+                            self.assertFalse(any(name.endswith("SHA256SUMS.txt") for name in names))
+                            if kit == "codex-windows":
+                                self.assertFalse(any("MicrosoftEdgeWebView2" in name for name in names))
+                            if kit == "codex-windows-runtime":
+                                self.assertTrue(any("MicrosoftEdgeWebView2" in name for name in names))
+                                self.assertFalse(any(name.endswith((".cmd", ".ps1")) for name in names))
                             self.assertTrue(any(name.endswith("THIRD_PARTY-NOTICES.md") for name in names))
                             self.assertFalse(any("__MACOSX" in name or "/._" in name for name in names))
                             if kit == "claude-macos":
@@ -142,6 +149,23 @@ class OfflineDesktopKitTests(unittest.TestCase):
                     MODULE.REPO_ROOT / "offline-desktop-kit/out",
                 )
 
+
+    def test_wrong_companion_webview_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            templates = base / "templates"
+            shutil.copytree(MODULE.TEMPLATES, templates, symlinks=True)
+            assets = self.create_assets(base, "codex-windows")
+            pin_test_manifest(templates, "codex-windows", assets)
+            (assets / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe").write_bytes(b"wrong-version")
+            old_templates = MODULE.TEMPLATES
+            MODULE.TEMPLATES = templates
+            try:
+                with self.assertRaisesRegex(MODULE.BuildError, "companion WebView2"):
+                    MODULE.build("codex-windows", assets, base / "output")
+            finally:
+                MODULE.TEMPLATES = old_templates
+
     def test_missing_payload_fails(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
@@ -187,7 +211,6 @@ class OfflineDesktopKitTests(unittest.TestCase):
         windows_scripts = [
             MODULE.TEMPLATES / "claude-windows/Windows/Install-And-Start.ps1",
             MODULE.TEMPLATES / "codex-windows/Windows/Install-And-Start.ps1",
-            MODULE.TEMPLATES / "codex-windows-runtime/Windows/Install-Runtime.ps1",
         ]
         for script in windows_scripts:
             text = script.read_text(encoding="utf-8-sig")
@@ -197,7 +220,6 @@ class OfflineDesktopKitTests(unittest.TestCase):
             self.assertNotIn("using the current user profile", text)
 
         codex_windows = windows_scripts[1].read_text(encoding="utf-8-sig")
-        codex_runtime = windows_scripts[2].read_text(encoding="utf-8-sig")
         codex_macos = (MODULE.TEMPLATES / "codex-macos/macOS/Install-And-Start.command").read_text(
             encoding="utf-8"
         )
@@ -206,12 +228,6 @@ class OfflineDesktopKitTests(unittest.TestCase):
         self.assertLess(
             codex_windows.index("if ($NewerClientDetected)"),
             codex_windows.index("if ($existingVersion -and $existingVersion -ge $expected)"),
-        )
-        self.assertIn("compatible_client", codex_runtime)
-        self.assertIn(".codex-primary-runtime.new-", codex_runtime)
-        self.assertLess(
-            codex_runtime.index("$newerClientDetected ="),
-            codex_runtime.index("if ($existingVersion -and $existingVersion -ge $expectedVersion)"),
         )
         self.assertIn("runtime_stage", codex_macos)
         self.assertIn("newer", codex_macos.lower())
@@ -223,6 +239,8 @@ class OfflineDesktopKitTests(unittest.TestCase):
         claude_windows = windows_scripts[0].read_text(encoding="utf-8-sig")
         self.assertIn("Get-InstalledGitVersion", claude_windows)
         self.assertIn("requiredGitVersion", claude_windows)
+        self.assertIn("-Verb RunAs -Wait -PassThru", claude_windows)
+        self.assertIn("User.Value -ne", claude_windows)
 
 
 if __name__ == "__main__":

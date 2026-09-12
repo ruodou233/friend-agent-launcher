@@ -1,5 +1,5 @@
 {
-  "package_version": "2026-08-09-clean.2",
+  "package_version": "2026-09-10",
   "author": "shing19",
   "agent": "claude",
   "platform": "windows-x64",
@@ -12,28 +12,29 @@
   "official_client": {
     "file": "official-client.msix",
     "publisher_contains": "Anthropic, PBC",
-    "sha256": "c7d61479f06a3490bd2598405aa95a428abb9fe31ed97f9e0a1fba7cd2745fe2"
+    "sha256": "dfc789cb60a88a5ba794c25903ebfc0f4552c650a157933b056c984366dbedca",
+    "version": "1.49585.0.0"
   },
   "claude_code_engine": {
     "file": "claude-code-engine.exe",
-    "version": "2.1.219",
-    "marker": "f284e5c1b9591c71d00fa56724dbb93e97f2ad9062043641288b0aac197a6764",
-    "sha256": "10f4c1f85b07f3cf6b8fff930fd26ecd475bd146a378acfafa559a6db9d89637"
+    "version": "2.1.260",
+    "marker": "664d2c6ca08afcd030100ddaddb80c5764bc517a4df407d819e6839bcc5edca8",
+    "sha256": "ab5fe6cb800a9faf3df1cc0f6bcb71f097296b302a16b576ca906446a22fea71"
   },
   "git_for_windows": {
     "file": "Git-for-Windows.exe",
-    "version": "2.55.0.3",
-    "sha256": "af12577d0fdff74243a5988197aa49b957d5044edc17004f6ddf0768996f1dca"
+    "version": "2.55.0.5",
+    "sha256": "d065a4e23c3d9a6b5073d609b5be0830227ec3ca053c083ba385061ddfaf94c6"
   },
   "webview2": {
     "file": "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
     "source": "https://go.microsoft.com/fwlink/?linkid=2124701",
     "publisher_contains": "Microsoft Corporation",
-    "sha256": "7d1ed8bd94b3fdb196fc39fcc02361ff977867b2b376bdd52e9b2a691a153190"
+    "sha256": "e7fa35755196ad9223596ef021a1ce6799509142eaa40ba35f634026be50b831"
   },
   "cc_switch": {
     "file": "CC-Switch.zip",
-    "version": "3.19.1",
-    "sha256": "aaefbadc03e6a9d4797d22ef22214a050bce1d8a0d73583bb407ac001ab92f5e"
+    "version": "3.20.2",
+    "sha256": "6c27a5bef4f444bd8cf30eee5af16d3d4b4d4f0f71c10c142beeed034ecb2eab"
   }
 }

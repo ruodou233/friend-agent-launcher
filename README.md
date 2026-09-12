@@ -1,22 +1,27 @@
-# AI 桌面客户端启动器原型｜AI Desktop Launcher Prototype
+# 官方桌面 Agent 离线安装 | Friend Agent Launcher
 
-A desktop launcher prototype for testing custom AI gateway configuration, currently focused on local Claude Desktop validation on macOS.
+组装官方 Claude / Codex 桌面客户端、CC Switch 和离线依赖，让朋友电脑上的 WorkBuddy 等 Agent 帮助安装与配置。
 
-这是一个非官方 companion/launcher 的源码基础，用来验证“保留官方桌面 App，只写入受信 Friend 配置”的本地流程。它不包含、修改、注入、重签或重新分发 Claude Desktop、ChatGPT 或 Codex 官方 App，也不等于可以发给朋友的安装包。
+Source templates for assembling offline desktop kits with official Claude/Codex clients and CC Switch. A local agent guides installation and configuration. Third-party installers and API keys are not included in this repository.
 
 作者：ruodou233、shing19。
 
-## 离线桌面素材包源码
+## 从这里开始
 
-[`offline-desktop-kit/`](offline-desktop-kit/) 开源了朋友现场安装方案的五个源码模板/本地构建单元：Claude Windows/macOS、Codex macOS、Codex Windows Base 和 Runtime。它面向真正的官方桌面客户端，并把 CC Switch 作为 Provider 配置工具；这是参考模板，不是已通过公开 Release 门禁的预构建产物。
+- [离线安装包：版本、载荷准备与构建](offline-desktop-kit/README.md)
+- [发给 WorkBuddy 的安装配置提示词](offline-desktop-kit/WORKBUDDY-PROMPT.md)
 
-公开仓库只发布安装脚本、manifest 模板和无密钥构建器；官方客户端、CC Switch、Runtime 与最终 ZIP 仍需用户从各自官方渠道取得并在仓库外组装。这不改变 `release-support.json` 对本仓公开预构建 Release 的阻断状态。
+离线方案已于 2026-09-13 获得维护者实际验收确认。本仓发布可复用源码，使用者自行准备官方载荷及服务线路；客户端保留官方签名，最终仍使用官方桌面界面。
+
+## 旧启动器与网关实验
+
+下文的 Tauri companion/launcher、固定 Friend 网关、计费控制面及其 release matrix 属于早期实验，保留供参考。它们的候选状态和发布门禁不等同于上面的离线素材包方案；本次更新没有验证或上线这些服务。
 
 ## 当前状态
 
 - **Claude macOS**：公开 `candidate` 只允许在 macOS 上生成本地 CI/现场验证包；公开启动器流程使用前必须已经安装官方 Claude Desktop。当前不宣称“下载即安装”“一键可用”或朋友可直接使用。
 - **Claude Windows**：公开 release matrix 仍为 `blocked`；私有构建器可生成 fresh-install candidate，但不等于 Windows release。
-- **Codex macOS / Windows**：公开 Tauri/Release 流程仍为 `blocked`；`offline-desktop-kit/` 只允许使用者在仓库外自行组装本地测试 ZIP，不向公开 Release 上传 Codex 二进制或预构建产物。
+- **Codex macOS / Windows**：公开 Tauri/Release 流程仍为 `blocked`；`offline-desktop-kit/` 只允许使用者在仓库外自行组装本地离线 ZIP，不向公开 Release 上传 Codex 二进制或预构建产物。
 - **Friend gateway**：仓内已有可运行的 dependency-free `reference/mock`，覆盖合同中的四条 Friend 路径；本地测试不需要真实凭据。`proxy` 只表示显式 adapter 边界，不代表真实上游已接通。
 - **真实外部链路**：VPS、公网 HTTPS/TLS、真实 New API catalog/balance adapter、朋友设备可达性、P0 和签名分发均未验证；`new-api-deployment/` 是未部署模板。Preflight 只证明显式配置的 endpoint 在当时可达且合同匹配，不代表真实 New API、带 Key 业务链路或 P0 已验证。
 - `contracts/friend-api.openapi.json` 和 `release-support.json` 是无密钥机器契约/门禁数据，不代表服务已经上线。

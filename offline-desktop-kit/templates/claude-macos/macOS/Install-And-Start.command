@@ -147,9 +147,11 @@ fi
 print ''
 print "安装完成：官方 Claude Desktop、普通/第三方线路的 Claude Code 引擎和 CC Switch 已安装给 $CONSOLE_USER。"
 if [[ "${FRIEND_AGENT_KIT_SKIP_OPEN:-0}" != "1" ]]; then
+  cc_app="$USER_APPS/CC Switch.app"
+  if [[ ! -d "$cc_app" ]]; then cc_app="/Applications/CC Switch.app"; fi
   if [[ "$(/usr/bin/id -u)" == "0" ]]; then
-    /usr/bin/sudo -u "$CONSOLE_USER" /usr/bin/open "$USER_APPS/CC Switch.app" >/dev/null 2>&1 || true
+    /usr/bin/sudo -u "$CONSOLE_USER" /usr/bin/open "$cc_app" >/dev/null 2>&1 || true
   else
-    /usr/bin/open "$USER_APPS/CC Switch.app" >/dev/null 2>&1 || true
+    /usr/bin/open "$cc_app" >/dev/null 2>&1 || true
   fi
 fi

@@ -28,6 +28,7 @@ TARGET_GROUP="$(/usr/bin/id -gn "$CONSOLE_USER")"
 USER_APPS="$TARGET_HOME/Applications"
 
 [[ "$(uname -s)" == "Darwin" ]] || die "This package only supports macOS."
+[[ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || true)" == "1" ]] || die "This Codex package requires an Apple Silicon Mac."
 [[ -f "$MANIFEST" ]] || die "Missing package-manifest.json"
 
 client_label="$(read_manifest client_label)"
@@ -105,7 +106,7 @@ if [[ ! -d "$installed_client_path" && -d "/Applications/$client_app_name.app" ]
   installed_client_path="/Applications/$client_app_name.app"
 fi
 [[ -d "$installed_client_path" ]] || die "Cannot locate the installed $client_label app."
-installed_client_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$installed_client_path/Contents/Info.plist")"
+installed_client_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$installed_client_path/Contents/Info.plist")"
 bundled_client_version="$(read_manifest official_client_version)"
 
 runtime_archive="$ASSETS/codex-primary-runtime.tar.xz"

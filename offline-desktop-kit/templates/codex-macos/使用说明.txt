@@ -1,0 +1,2 @@
+﻿全部解压后双击 START-macOS.command。安装后配置自己的服务地址、Key 和模型。
+仅支持 Apple 芯片 Mac，macOS 13 或更新版本。

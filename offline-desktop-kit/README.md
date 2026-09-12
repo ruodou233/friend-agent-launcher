@@ -1,71 +1,86 @@
-# Offline Desktop Kit
+# 官方桌面 Agent 离线安装素材包
 
-这套源码用于把用户自行取得的官方桌面安装器、离线 Runtime 和 CC Switch 发行包，组装成适合朋友现场安装的离线素材包。它保留真正的 Claude/Codex 桌面界面；CC Switch 只承担 Provider/Token 配置，不是聊天客户端。
+把官方 Claude / Codex 桌面客户端、CC Switch 和配套运行组件组装成离线 ZIP，再交给朋友电脑上的 WorkBuddy 等 Agent 完成安装和配置。用户继续使用官方桌面界面；CC Switch 管理服务地址、Key 和模型。
 
-作者：ruodou233、shing19。两位作者按本仓根目录 MIT 许可证发布本项目自有源码与模板；MIT 不覆盖第三方载荷、商标或其他项目的权利。
+本目录发布源码与构建模板，不包含第三方安装器、API Key 或预构建 ZIP。客户端保留原始签名。与仓库里的旧 Tauri 启动器、固定网关和计费实验相互独立。
 
-## 开源边界
+## 给使用者
 
-仓库只包含安装脚本、manifest 模板和构建器，不包含：
+先安装能操作本机的 WorkBuddy 或其他 Agent，收齐对应系统的素材包，再把 [安装配置提示词](WORKBUDDY-PROMPT.md) 发给它。服务地址与 Key 由使用者自行准备，在本地配置界面填写。
 
-- Claude Desktop、ChatGPT/Codex、Git for Windows、WebView2 等官方二进制；
-- CC Switch 二进制；
-- Claude Code/Codex Runtime；
-- API Key、账号密码、微信信息或私有 Provider 配置；
-- 已打包的朋友分发 ZIP。
+| 使用场景 | 构建单元 |
+|---|---|
+| Claude Windows x64 | `claude-windows` |
+| Claude Mac，Apple / Intel 芯片 | `claude-macos` |
+| Codex Mac，Apple 芯片 | `codex-macos` |
+| Codex Windows x64 | `codex-windows` 与 `codex-windows-runtime`，两份一起使用 |
 
-请从各项目官方渠道合法取得载荷，并遵守对应许可和分发条款。源码发布不代表 Anthropic、OpenAI、Microsoft 或 CC Switch 项目对本工具背书。
+Windows Codex 两包解压成并列文件夹，从主包的 `START-WINDOWS.cmd` 启动。其余主包运行 `START-WINDOWS.cmd` 或 `START-macOS.command`。组件包不另设安装入口。
 
-## 支持的构建单元
+Claude Windows 首装或升级需要当前桌面账户确认管理员权限；只提升官方 MSIX 安装子进程，后续配置保持普通用户身份。Claude 包包含 Code 引擎，不包含 Cowork 虚拟机。
 
-| `--kit` | 外部素材目录必须包含 |
+## 构建
+
+需要 Python 3.10+。Mac 包必须在 macOS 上构建，以保留应用符号链接和执行权限。载荷目录与输出目录都放在源码仓库外。
+
+| 构建单元 | 外部载荷目录中的文件 |
 |---|---|
 | `claude-macos` | `official-client.dmg`、`CC-Switch.dmg`、`CC-Switch-LICENSE`、`claude-code-engine-arm64.app/`、`claude-code-engine-x64.app/` |
 | `claude-windows` | `official-client.msix`、`CC-Switch.zip`、`CC-Switch-LICENSE`、`Git-for-Windows.exe`、`Git-for-Windows-LICENSE.txt`、`MicrosoftEdgeWebView2RuntimeInstallerX64.exe`、`claude-code-engine.exe` |
 | `codex-macos` | `official-client.dmg`、`CC-Switch.dmg`、`CC-Switch-LICENSE`、`codex-primary-runtime.tar.xz` |
-| `codex-windows` | `official-client.msix`、`CC-Switch.zip`、`CC-Switch-LICENSE`、`MicrosoftEdgeWebView2RuntimeInstallerX64.exe`、配套的 `codex-primary-runtime.tar.gz`（只校验，不写入 Base ZIP） |
-| `codex-windows-runtime` | `codex-primary-runtime.tar.gz` |
-
-Codex Windows 的 Base 和 Runtime 是两个配套 ZIP，朋友安装时需要放在同一父目录。
-
-## 构建
-
-Python 3.10 及以上。macOS kit 必须在 Mac 上构建，以保留 `.app` 的符号链接和 Unix 权限：
+| `codex-windows` | `official-client.msix`、`CC-Switch.zip`、`CC-Switch-LICENSE`；另提供配套的 `codex-primary-runtime.tar.gz` 和 `MicrosoftEdgeWebView2RuntimeInstallerX64.exe` 用于匹配校验，这两项不写入主包 |
+| `codex-windows-runtime` | `codex-primary-runtime.tar.gz`、`MicrosoftEdgeWebView2RuntimeInstallerX64.exe` |
 
 ```bash
 python3 offline-desktop-kit/build_offline_desktop_kits.py \
   --kit claude-macos \
-  --assets-dir /absolute/path/to/private-assets/claude-macos \
-  --output-dir /absolute/path/to/output
+  --assets-dir /path/to/external-assets/claude-macos \
+  --output-dir /path/to/output
 ```
 
-构建器会：
+对需要的平台分别运行。构建器核对固定 manifest 的载荷哈希，拒绝混入不同版本或覆盖现有 ZIP。ZIP 内保留必要脚本、manifest、载荷、授权说明和简短使用说明，不另附重复校验清单。输出先放支持硬链接的本地磁盘，再复制到微信、U 盘或共享目录。
 
-1. 从 `templates/<kit>/` 复制公开安装脚本；
-2. 从仓库外素材目录复制载荷；
-3. 根据 manifest 严格校验固定载荷的 SHA-256，不会用任意新文件覆盖已验证的声明；
-4. 生成包内 `SHA256SUMS.txt`；
-5. 保留符号链接与执行权限，生成不含 AppleDouble/`__MACOSX` 的 ZIP。
+## 版本与验收
 
-`--assets-dir` 和 `--output-dir` 必须都在源码仓库外。构建器先写临时文件，再以不覆盖的硬链接发布固定文件名；已有文件和符号链接都会被拒绝。因此请先输出到支持硬链接的本地磁盘（如 APFS、NTFS、ext4），再复制到 exFAT/FAT U 盘或不支持硬链接的 NAS/SMB 目录。
+这是一组 **2026-09-10 核验的配套版本**，不代表永久最新版：
 
-模板中的版本、Bundle ID、签名 Team ID、Runtime marker 和发布者字段对应已验证的 v2 载荷。升级官方客户端或 Runtime 时，维护者仍需同步更新这些身份与版本字段，并在目标系统真人验收；构建器不会猜测新版本兼容性。
+| 组件 | 版本 |
+|---|---|
+| Claude Desktop | Mac `1.49585.0`；Windows `1.49585.0.0` |
+| 桌面绑定的 Claude Code | `2.1.260` |
+| Codex Desktop | Mac `26.903.71938`；Windows MSIX `26.903.8094.0` |
+| Codex Primary Runtime | `26.905.11957` |
+| CC Switch | `3.20.2` |
+| Git for Windows | `2.55.0.5` |
 
-## v2 行为
+维护者于 **2026-09-13 确认已完成实际验收测试**；未单独记录各系统设备与账号的明细，不把这次确认扩展为所有机器和服务线路的兼容承诺。
 
-- Claude Code 引擎同时写入普通目录与第三方 Provider 使用的 `Claude-3p` 目录。
-- macOS 提权运行时识别真实桌面用户，并避免把应用装进 `/var/root`。
-- Windows 检测当前进程与桌面账户是否一致，避免把 AppX 和配置注册到 SYSTEM 或另一个管理员。
-- 已安装同版或更高版官方客户端时跳过旧载荷，继续补齐 Runtime/引擎。
-- Codex Runtime 先在新目录解压验证，再用可回滚的目录切换替换旧目录；已有同版/更新 Runtime 会保留，遇到更新客户端却没有明确更新的 Runtime 时停止安装。这不是抗掉电的事务式原子替换。
-- CC Switch 原位更新程序文件，保留用户已有 Provider 数据。
-- 安装包不包含 Key；Provider 配置由用户或其本地 Agent 完成。
-- 中国网络首次验收 Claude 时建议先测试 Code，不进入需要额外 VM 下载的 Cowork。
+9 月 10 日构建的五个 ZIP 均小于 1,000,000,000 字节。已检查载荷哈希、ZIP 完整性、macOS 签名、脚本语法、Windows 提权命令路径转义和版本比较。CI 在 macOS / Windows 上运行构建测试与脚本解析，不会真实安装客户端。
 
-## 安全与真实边界
+更新时同步调整桌面客户端、绑定引擎、运行组件和 manifest；不能只换安装器或放宽哈希。官方滚动下载链接可能已更新，若与清单不符，应重新核验整套版本。
 
-安装脚本会在目标系统核验官方签名、发布者或 Team ID；构建时根据 manifest 核对列明的固定文件或主可执行文件哈希。`assets-dir` 必须是构建者控制的受信输入；构建器不会净化任意 `.app` 内容或许可文本。某个第三方 Endpoint/Key 能否工作仍取决于协议兼容性、模型权限、余额与网络可达性。官方客户端升级也可能要求新的离线 Runtime，旧模板不能永久替代兼容性测试。
+官方来源：[Claude 发布源](https://downloads.claude.ai/releases/darwin/universal/RELEASES.json)、[Claude 桌面文档](https://code.claude.com/docs/en/desktop)、[Codex Mac 更新源](https://persistent.oaistatic.com/codex-app-prod/appcast.xml)、[Codex Windows 部署](https://learn.chatgpt.com/docs/enterprise/windows-deployment)、[CC Switch](https://github.com/farion1231/cc-switch/releases/tag/v3.20.2)。Code 引擎以桌面包内 manifest 为准；Codex 运行组件使用官方 `codex-primary-runtime/latest/<平台>/LATEST.json`。
 
-公开仓库不发布预构建二进制。你可以在自己的受信环境构建私人测试包，但不要把含第三方二进制或个人配置的产物直接提交回源码仓。如果还要把生成的 ZIP 交给朋友，该行为也可能构成分发：须先逐项确认再分发权与对应义务，包括 Git for Windows 及其捆绑组件可能要求的源码或书面要约；只附一份 license/notice 不一定充分。
+## 准备官方载荷
 
-上游起点：[CC Switch](https://github.com/farion1231/cc-switch)、[Git for Windows](https://gitforwindows.org/)、[WebView2 离线部署](https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution)。Claude/Codex 客户端与 Runtime 的来源和权利以构建当日的官方渠道与条款为准。
+Claude 这组固定桌面载荷：[Mac DMG](https://downloads.claude.ai/releases/darwin/universal/1.49585.0/Claude-41ad1dff5275eedc8af25989f59f33c5efe14063.dmg)、[Windows MSIX](https://downloads.claude.ai/releases/win32/x64/1.49585.0/Claude-41ad1dff5275eedc8af25989f59f33c5efe14063.msix)。下载后分别命名为 `official-client.dmg` / `official-client.msix`。
+
+桌面包内 `app.asar` 的 Code manifest 固定引擎版本、平台校验值及下载基址。这组引擎来自：
+
+- [Mac arm64 bundle](https://downloads.claude.ai/claude-code-releases/2.1.260/darwin-arm64/claude.app.tar.zst)
+- [Mac x64 bundle](https://downloads.claude.ai/claude-code-releases/2.1.260/darwin-x64/claude.app.tar.zst)
+- [Windows x64 binary](https://downloads.claude.ai/claude-code-releases/2.1.260/win32-x64/claude.exe.zst)
+
+用支持 zstd 的工具解压。Mac 保留完整 `claude.app` 及权限，按架构改目录名为载荷表里的两个 `.app`；Windows 解压为 `claude-code-engine.exe`。安装器的 `.verified` 标记对应压缩包校验值，而 manifest 内引擎哈希对应解压后的可执行文件，两者不要混用。
+
+Codex 运行组件固定载荷：[Mac arm64](https://persistent.oaistatic.com/codex-primary-runtime/26.905.11957/codex-primary-runtime-darwin-arm64-26.905.11957.tar.xz)、[Windows x64](https://persistent.oaistatic.com/codex-primary-runtime/26.905.11957/codex-primary-runtime-win32-x64-26.905.11957.tar.gz)。重命名为载荷表中的 `codex-primary-runtime.tar.xz` / `.tar.gz`，不提前解压。
+
+查询新运行组件使用 [Mac manifest](https://persistent.oaistatic.com/codex-primary-runtime/latest/darwin-arm64/LATEST.json) 或 [Windows manifest](https://persistent.oaistatic.com/codex-primary-runtime/latest/win32-x64/LATEST.json)，核对其中的下载地址、大小、哈希与版本后成套更新。
+
+Codex 桌面滚动下载：[Mac DMG](https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg)、[Windows MSIX](https://persistent.oaistatic.com/codex-app-prod/ChatGPT-x64.msix)。滚动链接不保证仍能取得 9 月 10 日的字节；与固定清单不符时重新验证新版本，不能跳过校验。
+
+CC Switch 使用 3.20.2 release 的 macOS DMG / Windows Portable ZIP，并附对应 LICENSE。Git 使用 [2.55.0.5 x64](https://github.com/git-for-windows/git/releases/tag/v2.55.0.windows.5) 及授权文件；WebView2 使用[微软 x64 离线安装器](https://go.microsoft.com/fwlink/?linkid=2124701)，同样按 manifest 核对版本载荷。
+
+## 源码与第三方载荷
+
+作者：ruodou233、shing19。项目自有源码遵循仓库 MIT 许可证；第三方客户端、运行组件和商标不由该许可证授权。取得与分发载荷时遵守各自许可，授权说明见 [THIRD_PARTY-NOTICES.md](THIRD_PARTY-NOTICES.md)。公开 Git 仓库与 Release 不上传第三方二进制、个人服务配置或 Key。

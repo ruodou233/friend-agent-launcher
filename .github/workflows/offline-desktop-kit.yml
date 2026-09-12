@@ -5,11 +5,13 @@ on:
     paths:
       - "offline-desktop-kit/**"
       - "tests/test_offline_desktop_kit.py"
+      - "tests/test_offline_elevation.ps1"
       - ".github/workflows/offline-desktop-kit.yml"
   pull_request:
     paths:
       - "offline-desktop-kit/**"
       - "tests/test_offline_desktop_kit.py"
+      - "tests/test_offline_elevation.ps1"
       - ".github/workflows/offline-desktop-kit.yml"
 
 permissions:
@@ -49,3 +51,7 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
+      - name: Test elevation command quoting
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/test_offline_elevation.ps1

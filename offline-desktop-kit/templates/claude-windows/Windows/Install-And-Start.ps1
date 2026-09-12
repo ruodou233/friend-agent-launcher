@@ -86,7 +86,40 @@ function Install-AppxIfNeeded([string]$Path) {
     Write-Host "Claude Desktop $($installed.Version) 已安装，不重复安装较旧或同版本。"
     return
   }
-  Add-AppxPackage -Path $Path
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+  if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Add-AppxPackage -Path $Path
+    return
+  }
+  # The official Claude MSIX contains a packaged service. Elevate only its installation.
+  $expectedSid = $identity.User.Value
+  $escapedPath = $Path.Replace("'", "''")
+  $installCommand = @"
+`$ErrorActionPreference = 'Stop'
+try {
+  if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '$expectedSid') {
+    throw '请使用当前桌面账户确认管理员权限，不能改用另一个管理员账户。'
+  }
+  Add-AppxPackage -Path '$escapedPath'
+  exit 0
+} catch {
+  [Console]::Error.WriteLine(`$_.Exception.Message)
+  exit 1
+}
+"@
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($installCommand))
+  Write-Host 'Claude 首次安装或升级需要管理员确认，请在接下来的 Windows 提示中选择“是”。'
+  $process = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+    -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
+    -Verb RunAs -Wait -PassThru
+  if ($process.ExitCode -ne 0) {
+    throw 'Claude 安装未完成。请确保当前桌面账户有管理员权限，并用该账户确认 Windows 提示。'
+  }
+  $registered = Get-AppxPackage -Name $identityName | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
+  if (-not $registered -or [version]$registered.Version -lt $bundledVersion) {
+    throw 'Claude 尚未注册给当前桌面用户，安装未完成。'
+  }
 }
 
 $client = Join-Path $Assets $manifest.official_client.file

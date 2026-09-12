@@ -57,13 +57,13 @@ SPECS = {
             "official-client.msix": "assets/official-client.msix",
             "CC-Switch.zip": "assets/CC-Switch.zip",
             "CC-Switch-LICENSE": "THIRD_PARTY-LICENSES/CC-Switch-LICENSE",
-            "MicrosoftEdgeWebView2RuntimeInstallerX64.exe": "assets/MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
         },
     },
     "codex-windows-runtime": {
         "root": "Friend-Codex-Windows-Offline-Runtime",
         "assets": {
             "codex-primary-runtime.tar.gz": "codex-primary-runtime.tar.gz",
+            "MicrosoftEdgeWebView2RuntimeInstallerX64.exe": "MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
         },
     },
 }
@@ -90,10 +90,10 @@ HASH_BINDINGS = {
     "codex-windows": [
         ("assets/official-client.msix", ("official_client", "sha256")),
         ("assets/CC-Switch.zip", ("cc_switch", "sha256")),
-        ("assets/MicrosoftEdgeWebView2RuntimeInstallerX64.exe", ("webview2_runtime", "sha256")),
     ],
     "codex-windows-runtime": [
         ("codex-primary-runtime.tar.gz", ("sha256",)),
+        ("MicrosoftEdgeWebView2RuntimeInstallerX64.exe", ("webview2_sha256",)),
     ],
 }
 
@@ -146,20 +146,17 @@ def validate_manifest(kit: str, root: Path, assets_dir: Path) -> None:
         companion = assets_dir / "codex-primary-runtime.tar.gz"
         if not companion.is_file():
             raise BuildError(f"missing companion payload used by the Base manifest: {companion}")
+        webview = assets_dir / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+        if not webview.is_file():
+            raise BuildError(f"missing companion WebView2 payload: {webview}")
+        if sha256_file(webview) != nested_value(manifest, ("webview2_runtime", "sha256")):
+            raise BuildError("companion WebView2 does not match Base manifest")
         expected = nested_value(manifest, ("codex_primary_runtime", "sha256"))
         actual = sha256_file(companion)
         if actual != expected:
             raise BuildError(
                 f"companion Runtime does not match Base manifest: expected {expected}, got {actual}"
             )
-
-
-def write_checksums(root: Path) -> None:
-    checksum_path = root / "SHA256SUMS.txt"
-    rows = []
-    for path in sorted(p for p in root.rglob("*") if p.is_file() and p != checksum_path):
-        rows.append(f"{sha256_file(path)}  ./{path.relative_to(root).as_posix()}")
-    checksum_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
 def write_zip(source_root: Path, output: Path) -> None:
@@ -237,7 +234,6 @@ def build(kit: str, assets_dir: Path, output_dir: Path) -> Path:
             copy_payload(assets_dir / external_name, root / relative_target)
         shutil.copy2(HERE / "THIRD_PARTY-NOTICES.md", root / "THIRD_PARTY-NOTICES.md")
         validate_manifest(kit, root, assets_dir)
-        write_checksums(root)
         filename = f"{spec['root']}-open-source-build.zip"
         output = output_dir / filename
         write_zip(root, output)
